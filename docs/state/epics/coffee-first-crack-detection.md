@@ -1,7 +1,7 @@
 # Epic: Coffee First Crack Detection — HuggingFace Model Repository
 
 **GitHub Issue**: [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1)
-**Status**: 🟡 In Progress — Phases 1–3 complete, Phase 4 in progress (S13 remaining)
+**Status**: ✅ Complete — all 14 stories done
 **Last Updated**: 2026-04-03
 
 ## Objective
@@ -40,19 +40,24 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 ### Phase 4 — Publishing
 - [x] S11 [#12](https://github.com/syamaner/coffee-first-crack-detection/issues/12): Implement scripts/push_to_hub.py ✅
 - [x] S12 [#13](https://github.com/syamaner/coffee-first-crack-detection/issues/13): Write HuggingFace model card README.md ✅
-- [ ] S13 [#14](https://github.com/syamaner/coffee-first-crack-detection/issues/14): Create notebooks/quickstart.ipynb ← **next**
+- [x] S13 [#14](https://github.com/syamaner/coffee-first-crack-detection/issues/14): Create notebooks/quickstart.ipynb ✅
+  - `notebooks/quickstart.ipynb` — Colab-compatible, loads model + dataset from HF Hub
+  - Single-window classification with probability bar chart
+  - Sliding-window demo with assembled roast recording and probability timeline plot
 - [x] S14 [#15](https://github.com/syamaner/coffee-first-crack-detection/issues/15): Write pytest test suite ✅
 
 ---
 
 ## Active Context
 
-**Current work**: S13 — create `notebooks/quickstart.ipynb` (last remaining story).
+**All stories complete.** 14/14 ✅
 
 **PRs merged**:
 - PR #16: train.py, evaluate.py, inference.py
 - PR #17: export_onnx.py, benchmark_platforms.py, push_to_hub.py, tests
 - PR #18: input_values key fix, accelerate dep, build backend fix, training validated
+- PR #19: docs state update — 13/14 complete
+- PR #20 (pending): notebooks/quickstart.ipynb
 
 **Blockers**:
 - 5 new mic-2 WAV recordings in `data/raw/` need Label Studio annotation before final dataset can be published to HuggingFace. This does not block the notebook.
