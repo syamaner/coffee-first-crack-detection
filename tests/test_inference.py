@@ -45,9 +45,14 @@ def silent_wav(tmp_path: Path) -> Path:
     return path
 
 
+@pytest.mark.slow
 class TestSlidingWindowInference:
     def test_no_detection_on_silence(self, silent_wav: Path) -> None:
-        """Silent audio should produce no first crack events (noise gate triggers)."""
+        """Silent audio should produce no first crack events (noise gate triggers).
+
+        Marked slow: loads ~86M param model from HuggingFace Hub.
+        Run with: pytest -m slow
+        """
         detector = SlidingWindowInference(
             model_name_or_path="MIT/ast-finetuned-audioset-10-10-0.4593",
             device="cpu",
@@ -84,6 +89,7 @@ class TestFirstCrackDetector:
         with pytest.raises(ValueError, match="Must specify"):
             FirstCrackDetector()
 
+    @pytest.mark.slow
     def test_is_first_crack_returns_false_before_start(self, silent_wav: Path) -> None:
         detector = FirstCrackDetector(
             audio_file=silent_wav,
@@ -95,15 +101,14 @@ class TestFirstCrackDetector:
         detector = FirstCrackDetector(audio_file=silent_wav)
         assert not detector.is_running
 
+    @pytest.mark.slow
     def test_start_stop_lifecycle(self, silent_wav: Path) -> None:
-        """Detector starts, runs briefly, stops cleanly without errors."""
+        """Detector starts and stops cleanly without errors."""
         detector = FirstCrackDetector(
             audio_file=silent_wav,
             model_name_or_path="MIT/ast-finetuned-audioset-10-10-0.4593",
         )
         detector.start()
         assert detector.is_running
-        import time
-        time.sleep(0.5)
         detector.stop()
         assert not detector.is_running

@@ -54,7 +54,7 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 - model.py, dataset.py, utils/device.py, utils/metrics.py
 - AGENTS.md, 4 .claude/skills/, README.md model card
 - docs/data_preparation.md (Label Studio annotation guide)
-- docs/state/ epic tracking
+- docs/state/ (registry + epic tracking)
 
 **Blockers**:
 - New mic-2 recordings (4 WAVs in data/raw/, 5th tomorrow) need Label Studio annotation before Phase 4 dataset publishing. Does not block Phase 2 or 3.

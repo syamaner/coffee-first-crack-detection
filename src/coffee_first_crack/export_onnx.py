@@ -41,8 +41,6 @@ def export_onnx(
     """
     try:
         from optimum.onnxruntime import ORTModelForAudioClassification
-        from optimum.onnxruntime.configuration import AutoQuantizationConfig
-        from optimum.onnxruntime import ORTQuantizer
     except ImportError as exc:
         raise ImportError(
             "Install optimum: pip install 'optimum[onnxruntime]'"
@@ -70,26 +68,31 @@ def export_onnx(
 
     results: dict[str, Path] = {"fp32": fp32_path}
 
-    # INT8 dynamic quantization
+    # INT8 dynamic quantization — uses onnxruntime.quantization.quantize_dynamic
+    # which is portable across architectures (x86, ARM64/RPi5, etc.)
     if quantize:
-        print("\nApplying INT8 dynamic quantization...")
-        quantization_config = AutoQuantizationConfig.avx512_vnni(
-            is_static=False,
-            per_channel=False,
-        )
-        quantizer = ORTQuantizer.from_pretrained(str(fp32_dir))
+        print("\nApplying INT8 dynamic quantization (portable, ARM64-compatible)...")
+        try:
+            from onnxruntime.quantization import quantize_dynamic, QuantType
+        except ImportError as exc:
+            raise ImportError(
+                "Install onnxruntime: pip install onnxruntime"
+            ) from exc
+
         int8_dir = output_dir / "int8"
         int8_dir.mkdir(exist_ok=True)
-        quantizer.quantize(
-            save_dir=str(int8_dir),
-            quantization_config=quantization_config,
-        )
         int8_path = int8_dir / "model_quantized.onnx"
+
+        quantize_dynamic(
+            model_input=str(fp32_path),
+            model_output=str(int8_path),
+            weight_type=QuantType.QInt8,
+        )
+
         if not int8_path.exists():
-            # fallback: optimum may use a different name
-            candidates = list(int8_dir.glob("*.onnx"))
-            if candidates:
-                int8_path = candidates[0]
+            raise FileNotFoundError(
+                f"Quantized ONNX model was not found after quantization in: {int8_dir}"
+            )
         print(f"INT8 ONNX saved to: {int8_path}")
         results["int8"] = int8_path
 
@@ -152,11 +155,17 @@ def benchmark_onnx(
     for _ in range(n_warmup):
         sess.run(None, {input_name: input_features})
 
-    # Timed runs
+    # Timed runs — include feature extraction for end-to-end latency
+    # (matches PyTorch benchmark which times predict_proba including feature extraction)
     latencies: list[float] = []
     for _ in range(n_runs):
         t0 = time.perf_counter()
-        sess.run(None, {input_name: input_features})
+        run_inputs = feature_extractor(
+            [dummy_audio.tolist()],
+            sampling_rate=sample_rate,
+            return_tensors="np",
+        )
+        sess.run(None, {input_name: run_inputs["input_features"]})
         latencies.append((time.perf_counter() - t0) * 1000)
 
     return {

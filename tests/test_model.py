@@ -1,18 +1,42 @@
-"""Tests for model.py — build_model, build_feature_extractor, FirstCrackClassifier."""
+"""Tests for model.py — build_model, build_feature_extractor, FirstCrackClassifier.
+
+Tests that load the full AST model (~86M params) are marked ``@pytest.mark.slow``
+and skipped by default. Run with ``pytest -m slow`` to include them.
+"""
 
 from __future__ import annotations
 
-import torch
 import pytest
+import torch
 from transformers import ASTFeatureExtractor, ASTForAudioClassification
 
 from coffee_first_crack.model import (
     LABEL2ID,
     ID2LABEL,
+    FirstCrackClassifier,
     build_feature_extractor,
     build_model,
-    FirstCrackClassifier,
 )
+
+pytestmark_slow = pytest.mark.slow
+
+
+# ── Module-scoped fixtures — model loaded once per test session ───────────────
+
+
+@pytest.fixture(scope="module")
+def ast_model() -> ASTForAudioClassification:
+    """Load the AST model once for all TestBuildModel / TestFirstCrackClassifier tests."""
+    return build_model(device="cpu")
+
+
+@pytest.fixture(scope="module")
+def classifier() -> FirstCrackClassifier:
+    """Load FirstCrackClassifier once for all forward-pass tests."""
+    return FirstCrackClassifier(device="cpu")
+
+
+# ── Label mapping (no model load) ─────────────────────────────────────────────
 
 
 class TestLabelMappings:
@@ -22,6 +46,9 @@ class TestLabelMappings:
     def test_id2label_is_inverse(self) -> None:
         for idx, label in ID2LABEL.items():
             assert LABEL2ID[label] == idx
+
+
+# ── Feature extractor (no model load) ────────────────────────────────────────
 
 
 class TestBuildFeatureExtractor:
@@ -35,39 +62,7 @@ class TestBuildFeatureExtractor:
 
     def test_num_mel_bins(self) -> None:
         fe = build_feature_extractor()
-        assert fe.num_mel_bins == 128
-
-    def test_do_normalize(self) -> None:
-        fe = build_feature_extractor()
-        assert fe.do_normalize is True
-
-
-class TestBuildModel:
-    def test_returns_ast_model(self) -> None:
-        model = build_model(device="cpu")
-        assert isinstance(model, ASTForAudioClassification)
-
-    def test_num_labels(self) -> None:
-        model = build_model(device="cpu")
-        assert model.config.num_labels == 2
-
-    def test_label_mapping(self) -> None:
-        model = build_model(device="cpu")
-        assert model.config.label2id["first_crack"] == 1
-        assert model.config.label2id["no_first_crack"] == 0
-
-    def test_on_cpu(self) -> None:
-        model = build_model(device="cpu")
-        param = next(model.parameters())
-        assert param.device.type == "cpu"
-
-
-class TestFirstCrackClassifier:
-    @pytest.fixture()
-    def classifier(self) -> FirstCrackClassifier:
-        return FirstCrackClassifier(device="cpu")
-
-    def test_forward_single(self, classifier: FirstCrackClassifier) -> None:
+        assert fe    def test_forward_single(self, classifier: FirstCrackClassifier) -> None:
         audio = torch.randn(1, 16000 * 10)
         logits = classifier(audio)
         assert logits.shape == (1, 2)

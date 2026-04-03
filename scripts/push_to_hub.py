@@ -68,6 +68,8 @@ def push_model(model_dir: Path, repo_id: str) -> None:
     """Push model and feature extractor to HuggingFace Hub."""
     from transformers import ASTForAudioClassification, ASTFeatureExtractor
 
+    from huggingface_hub import HfApi
+
     _validate_model_card(model_dir)
     print(f"Loading model from {model_dir}...")
     model = ASTForAudioClassification.from_pretrained(str(model_dir))
@@ -76,6 +78,20 @@ def push_model(model_dir: Path, repo_id: str) -> None:
     print(f"Pushing model to {repo_id}...")
     model.push_to_hub(repo_id)
     extractor.push_to_hub(repo_id)
+
+    # Explicitly upload README.md (model card) to ensure it's present on Hub
+    api = HfApi()
+    readme = model_dir / "README.md"
+    if not readme.exists():
+        readme = Path("README.md")
+    if readme.exists():
+        api.upload_file(
+            path_or_fileobj=str(readme),
+            path_in_repo="README.md",
+            repo_id=repo_id,
+            repo_type="model",
+        )
+        print("Model card README.md uploaded.")
     print(f"Model pushed to https://huggingface.co/{repo_id}")
 
 
@@ -142,8 +158,11 @@ def push_onnx(onnx_dir: Path, repo_id: str) -> None:
         return
 
     for onnx_file in onnx_files:
-        path_in_repo = f"onnx/{onnx_file.name}"
-        print(f"Uploading {onnx_file.name} → {repo_id}/{path_in_repo}")
+        # Preserve relative subdirectory structure (e.g., onnx/fp32/model.onnx)
+        # to avoid name collisions when multiple variants exist
+        rel = onnx_file.relative_to(onnx_dir)
+        path_in_repo = f"onnx/{rel}"
+        print(f"Uploading {rel} → {repo_id}/{path_in_repo}")
         api.upload_file(
             path_or_fileobj=str(onnx_file),
             path_in_repo=path_in_repo,
