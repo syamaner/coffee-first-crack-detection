@@ -15,6 +15,15 @@ from coffee_first_crack.model import (
 )
 
 
+class TestLabelMappings:
+    def test_label2id_keys(self) -> None:
+        assert set(LABEL2ID.keys()) == {"first_crack", "no_first_crack"}
+
+    def test_id2label_is_inverse(self) -> None:
+        for idx, label in ID2LABEL.items():
+            assert LABEL2ID[label] == idx
+
+
 class TestBuildFeatureExtractor:
     def test_returns_ast_extractor(self) -> None:
         fe = build_feature_extractor()

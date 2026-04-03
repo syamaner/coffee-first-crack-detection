@@ -41,11 +41,20 @@ def benchmark_pytorch(
     for _ in range(n_warmup):
         _ = classifier.predict_proba(dummy)
 
+    def _sync() -> None:
+        """Synchronise async GPU/MPS ops so timing is accurate."""
+        if device == "cuda" and torch.cuda.is_available():
+            torch.cuda.synchronize()
+        elif device == "mps" and torch.backends.mps.is_available():
+            torch.mps.synchronize()
+
     latencies: list[float] = []
     with torch.inference_mode():
         for _ in range(n_runs):
+            _sync()
             t0 = time.perf_counter()
             classifier.predict_proba(dummy)
+            _sync()
             latencies.append((time.perf_counter() - t0) * 1000)
 
     stats = {

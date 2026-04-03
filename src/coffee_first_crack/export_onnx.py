@@ -19,9 +19,6 @@ import time
 from pathlib import Path
 
 import numpy as np
-import torch
-from transformers import ASTFeatureExtractor
-
 from coffee_first_crack.model import build_feature_extractor
 
 
@@ -63,6 +60,7 @@ def export_onnx(
     ort_model = ORTModelForAudioClassification.from_pretrained(
         model_dir,
         export=True,
+        opset=opset_version,
     )
     fp32_dir = output_dir / "fp32"
     fp32_dir.mkdir(exist_ok=True)
@@ -180,12 +178,10 @@ def main() -> None:
         help="Output directory (default: exports/onnx)",
     )
     parser.add_argument(
-        "--quantize", action="store_true", default=True,
-        help="Also produce INT8 quantized variant (default: True)",
-    )
-    parser.add_argument(
-        "--no-quantize", dest="quantize", action="store_false",
-        help="Skip INT8 quantization",
+        "--quantize",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Produce INT8 quantized variant (default: True, use --no-quantize to skip)",
     )
     parser.add_argument(
         "--benchmark", action="store_true",

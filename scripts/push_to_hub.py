@@ -27,10 +27,48 @@ import sys
 from pathlib import Path
 
 
+def _validate_model_card(model_dir: Path) -> None:
+    """Validate README.md YAML frontmatter before pushing.
+
+    Args:
+        model_dir: Checkpoint directory expected to contain a README.md.
+
+    Raises:
+        ValueError: If the README is missing required frontmatter fields.
+    """
+    import yaml
+
+    readme = model_dir / "README.md"
+    # Fall back to repo-root README
+    if not readme.exists():
+        readme = Path("README.md")
+    if not readme.exists():
+        print("Warning: README.md not found — skipping model card validation")
+        return
+
+    content = readme.read_text()
+    if not content.startswith("---"):
+        raise ValueError("README.md is missing YAML frontmatter (expected '---' at start)")
+
+    # Extract YAML block between first pair of ---
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        raise ValueError("README.md frontmatter is malformed (missing closing '---')")
+
+    metadata = yaml.safe_load(parts[1])
+    required = {"pipeline_tag", "license", "base_model"}
+    missing = required - set(metadata or {})
+    if missing:
+        raise ValueError(f"README.md frontmatter missing required fields: {missing}")
+
+    print("Model card YAML frontmatter is valid.")
+
+
 def push_model(model_dir: Path, repo_id: str) -> None:
     """Push model and feature extractor to HuggingFace Hub."""
     from transformers import ASTForAudioClassification, ASTFeatureExtractor
 
+    _validate_model_card(model_dir)
     print(f"Loading model from {model_dir}...")
     model = ASTForAudioClassification.from_pretrained(str(model_dir))
     extractor = ASTFeatureExtractor.from_pretrained(str(model_dir))
@@ -48,7 +86,7 @@ def push_dataset(
 ) -> None:
     """Push audio dataset with metadata to HuggingFace Datasets Hub."""
     import csv
-    from datasets import Audio, Dataset, DatasetDict, Features, Value
+    from datasets import Audio, Dataset, DatasetDict
 
     splits: dict[str, list] = {"train": [], "val": [], "test": []}
     meta_by_stem: dict[str, dict] = {}
