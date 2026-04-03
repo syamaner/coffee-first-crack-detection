@@ -161,7 +161,7 @@ def push_onnx(onnx_dir: Path, repo_id: str) -> None:
         # Preserve relative subdirectory structure (e.g., onnx/fp32/model.onnx)
         # to avoid name collisions when multiple variants exist
         rel = onnx_file.relative_to(onnx_dir)
-        path_in_repo = f"onnx/{rel}"
+        path_in_repo = f"onnx/{rel.as_posix()}"  # as_posix() avoids Windows backslashes
         print(f"Uploading {rel} → {repo_id}/{path_in_repo}")
         api.upload_file(
             path_or_fileobj=str(onnx_file),

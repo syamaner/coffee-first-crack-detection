@@ -96,10 +96,16 @@ def export_onnx(
         print(f"INT8 ONNX saved to: {int8_path}")
         results["int8"] = int8_path
 
-    # Copy feature extractor config alongside ONNX for deployment convenience
+    # Save feature extractor config into every variant directory so each can be
+    # deployed or uploaded independently (e.g., just the int8/ folder to RPi5)
     feature_extractor = build_feature_extractor()
-    feature_extractor.save_pretrained(str(output_dir))
-    print(f"\nFeature extractor config saved to: {output_dir}")
+    config_dirs = {output_dir} | {path.parent for path in results.values()}
+    for config_dir in sorted(config_dirs, key=str):
+        feature_extractor.save_pretrained(str(config_dir))
+    print(
+        "\nFeature extractor config saved to: "
+        + ", ".join(str(d) for d in sorted(config_dirs, key=str))
+    )
 
     _print_size_summary(results)
     return results
