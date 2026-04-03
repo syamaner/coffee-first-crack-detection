@@ -45,6 +45,20 @@ def silent_wav(tmp_path: Path) -> Path:
     return path
 
 
+class TestDetectionEvent:
+    """Fast tests for the DetectionEvent dataclass — no model load."""
+
+    def test_fields_are_correctly_typed(self) -> None:
+        event = DetectionEvent(
+            timestamp_sec=42.0,
+            timestamp_str="00:42",
+            confidence=7,
+        )
+        assert event.timestamp_sec == 42.0
+        assert event.timestamp_str == "00:42"
+        assert event.confidence == 7
+
+
 @pytest.mark.slow
 class TestSlidingWindowInference:
     def test_no_detection_on_silence(self, silent_wav: Path) -> None:
@@ -61,17 +75,6 @@ class TestSlidingWindowInference:
         # Silent audio is blocked by the noise gate (RMS < 0.01)
         assert isinstance(events, list)
         assert len(events) == 0
-
-    def test_returns_detection_event_type(self, tmp_path: Path) -> None:
-        """Verify DetectionEvent fields are correctly typed."""
-        event = DetectionEvent(
-            timestamp_sec=42.0,
-            timestamp_str="00:42",
-            confidence=7,
-        )
-        assert event.timestamp_sec == 42.0
-        assert event.timestamp_str == "00:42"
-        assert event.confidence == 7
 
 
 # ── FirstCrackDetector ────────────────────────────────────────────────────────
@@ -97,8 +100,13 @@ class TestFirstCrackDetector:
         )
         assert detector.is_first_crack() is False
 
+    @pytest.mark.slow
     def test_not_running_before_start(self, silent_wav: Path) -> None:
-        detector = FirstCrackDetector(audio_file=silent_wav)
+        # FirstCrackDetector loads the model at init — mark slow
+        detector = FirstCrackDetector(
+            audio_file=silent_wav,
+            model_name_or_path="MIT/ast-finetuned-audioset-10-10-0.4593",
+        )
         assert not detector.is_running
 
     @pytest.mark.slow

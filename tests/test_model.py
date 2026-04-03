@@ -18,15 +18,13 @@ from coffee_first_crack.model import (
     build_model,
 )
 
-pytestmark_slow = pytest.mark.slow
 
-
-# ── Module-scoped fixtures — model loaded once per test session ───────────────
+# ── Module-scoped fixtures — model loaded once per slow test session ──────────
 
 
 @pytest.fixture(scope="module")
 def ast_model() -> ASTForAudioClassification:
-    """Load the AST model once for all TestBuildModel / TestFirstCrackClassifier tests."""
+    """Load the AST model once for all TestBuildModel tests."""
     return build_model(device="cpu")
 
 
@@ -36,7 +34,7 @@ def classifier() -> FirstCrackClassifier:
     return FirstCrackClassifier(device="cpu")
 
 
-# ── Label mapping (no model load) ─────────────────────────────────────────────
+# ── Label mapping — fast, no model load ──────────────────────────────────────
 
 
 class TestLabelMappings:
@@ -48,7 +46,7 @@ class TestLabelMappings:
             assert LABEL2ID[label] == idx
 
 
-# ── Feature extractor (no model load) ────────────────────────────────────────
+# ── Feature extractor — fast, no model load ───────────────────────────────────
 
 
 class TestBuildFeatureExtractor:
@@ -62,7 +60,39 @@ class TestBuildFeatureExtractor:
 
     def test_num_mel_bins(self) -> None:
         fe = build_feature_extractor()
-        assert fe    def test_forward_single(self, classifier: FirstCrackClassifier) -> None:
+        assert fe.num_mel_bins == 128
+
+    def test_do_normalize(self) -> None:
+        fe = build_feature_extractor()
+        assert fe.do_normalize is True
+
+
+# ── Build model — slow (loads ~86M params from HuggingFace Hub) ───────────────
+
+
+@pytest.mark.slow
+class TestBuildModel:
+    def test_returns_ast_model(self, ast_model: ASTForAudioClassification) -> None:
+        assert isinstance(ast_model, ASTForAudioClassification)
+
+    def test_num_labels(self, ast_model: ASTForAudioClassification) -> None:
+        assert ast_model.config.num_labels == 2
+
+    def test_label_mapping(self, ast_model: ASTForAudioClassification) -> None:
+        assert ast_model.config.label2id["first_crack"] == 1
+        assert ast_model.config.label2id["no_first_crack"] == 0
+
+    def test_on_cpu(self, ast_model: ASTForAudioClassification) -> None:
+        param = next(ast_model.parameters())
+        assert param.device.type == "cpu"
+
+
+# ── Classifier forward pass — slow (loads ~86M params) ───────────────────────
+
+
+@pytest.mark.slow
+class TestFirstCrackClassifier:
+    def test_forward_single(self, classifier: FirstCrackClassifier) -> None:
         audio = torch.randn(1, 16000 * 10)
         logits = classifier(audio)
         assert logits.shape == (1, 2)
