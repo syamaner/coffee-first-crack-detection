@@ -130,7 +130,7 @@ class _HFDatasetAdapter(torch.utils.data.Dataset):
             padding=True,
         )
         return {
-            "input_features": inputs["input_features"].squeeze(0),
+            "input_values": inputs["input_values"].squeeze(0),
             "labels": torch.tensor(label, dtype=torch.long),
         }
 
