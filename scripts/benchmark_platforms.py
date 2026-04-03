@@ -93,14 +93,14 @@ def benchmark_onnx_runtime(
     # Warmup — include feature extraction to match PyTorch benchmark
     for _ in range(n_warmup):
         inputs = extractor([dummy_audio.tolist()], sampling_rate=16000, return_tensors="np")
-        sess.run(None, {input_name: inputs["input_features"]})
+        sess.run(None, {input_name: inputs["input_values"]})
 
     # Timed runs — end-to-end (feature extraction + model inference)
     latencies: list[float] = []
     for _ in range(n_runs):
         t0 = time.perf_counter()
         inputs = extractor([dummy_audio.tolist()], sampling_rate=16000, return_tensors="np")
-        sess.run(None, {input_name: inputs["input_features"]})
+        sess.run(None, {input_name: inputs["input_values"]})
         latencies.append((time.perf_counter() - t0) * 1000)
 
     stats = {

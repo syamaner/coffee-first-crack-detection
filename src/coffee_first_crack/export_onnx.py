@@ -155,11 +155,11 @@ def benchmark_onnx(
         sampling_rate=sample_rate,
         return_tensors="np",
     )
-    input_features = inputs["input_features"]
+    input_values = inputs["input_values"]
 
     # Warmup
     for _ in range(n_warmup):
-        sess.run(None, {input_name: input_features})
+        sess.run(None, {input_name: input_values})
 
     # Timed runs — include feature extraction for end-to-end latency
     # (matches PyTorch benchmark which times predict_proba including feature extraction)
@@ -171,7 +171,7 @@ def benchmark_onnx(
             sampling_rate=sample_rate,
             return_tensors="np",
         )
-        sess.run(None, {input_name: run_inputs["input_features"]})
+        sess.run(None, {input_name: run_inputs["input_values"]})
         latencies.append((time.perf_counter() - t0) * 1000)
 
     return {

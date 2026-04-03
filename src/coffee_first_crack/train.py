@@ -108,9 +108,9 @@ class WeightedLossTrainer(Trainer):
 class _HFDatasetAdapter(torch.utils.data.Dataset):
     """Wraps ``FirstCrackDataset`` to return dicts compatible with HF Trainer.
 
-    The Trainer expects batches with ``input_values`` (or ``input_features``)
-    and ``labels``. We use the ``ASTFeatureExtractor`` to convert raw waveforms
-    to ``input_features`` on-the-fly.
+    ``ASTFeatureExtractor`` returns ``input_values`` as the key (not
+    ``input_features`` as the name might suggest). Each item yields a dict
+    with ``input_values`` (the mel spectrogram tensor) and ``labels``.
     """
 
     def __init__(self, base_dataset: FirstCrackDataset) -> None:
@@ -130,7 +130,7 @@ class _HFDatasetAdapter(torch.utils.data.Dataset):
             padding=True,
         )
         return {
-            "input_features": inputs["input_features"].squeeze(0),
+            "input_values": inputs["input_values"].squeeze(0),
             "labels": torch.tensor(label, dtype=torch.long),
         }
 
