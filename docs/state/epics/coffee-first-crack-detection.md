@@ -1,7 +1,7 @@
 # Epic: Coffee First Crack Detection — HuggingFace Model Repository
 
 **GitHub Issue**: [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1)
-**Status**: 🟡 In Progress — Phase 1 scaffolding underway
+**Status**: 🟡 In Progress — Phase 1 complete, moving to Phase 2
 **Last Updated**: 2026-04-03
 
 ## Objective
@@ -12,10 +12,12 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 ## Status Map
 
 ### Phase 1 — Scaffold & Data
-- [x] S1 [#2](https://github.com/syamaner/coffee-first-crack-detection/issues/2): Scaffold repo structure, pyproject.toml, configs, AGENTS.md, skills
-  - GitHub repo created, directories scaffolded
-  - pyproject.toml, requirements.txt, requirements-pi.txt, configs/default.yaml ✅
-  - AGENTS.md, .claude/skills/ — pending
+- [x] S1 [#2](https://github.com/syamaner/coffee-first-crack-detection/issues/2): Scaffold repo structure, pyproject.toml, configs, AGENTS.md, skills ✅
+  - GitHub repo created, full directory structure scaffolded
+  - pyproject.toml, requirements.txt, requirements-pi.txt, configs/default.yaml
+  - AGENTS.md, .claude/skills/ (train-model, evaluate-model, export-onnx, push-to-hub)
+  - README.md model card, docs/data_preparation.md, docs/state/
+  - Committed e6f8b74, pushed to main
 - [x] S2 [#3](https://github.com/syamaner/coffee-first-crack-detection/issues/3): Port dataset.py with HF Datasets integration and filename metadata
   - `src/coffee_first_crack/dataset.py` created ✅
   - Filename parser (new convention + legacy), recordings.csv generation, create_dataloaders()
@@ -45,26 +47,17 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 
 ## Active Context
 
-**Current work**: Completing Phase 1 scaffolding — remaining items are AGENTS.md, .claude/skills/, then committing the initial scaffold + opening PR for S1.
+**Current work**: Phase 1 complete. Next: Phase 2 — implement train.py (S5/#6) and evaluate.py (S6/#7).
 
-**Files created so far**:
-```
-src/coffee_first_crack/__init__.py
-src/coffee_first_crack/model.py
-src/coffee_first_crack/dataset.py
-src/coffee_first_crack/utils/__init__.py
-src/coffee_first_crack/utils/device.py
-src/coffee_first_crack/utils/metrics.py
-configs/default.yaml
-pyproject.toml
-requirements.txt
-requirements-pi.txt
-docs/state/registry.md
-docs/state/epics/coffee-first-crack-detection.md
-```
+**Phase 1 delivered (commit e6f8b74)**:
+- Full repo scaffold, pyproject.toml, configs, requirements
+- model.py, dataset.py, utils/device.py, utils/metrics.py
+- AGENTS.md, 4 .claude/skills/, README.md model card
+- docs/data_preparation.md (Label Studio annotation guide)
+- docs/state/ (registry + epic tracking)
 
 **Blockers**:
-- New mic-2 recordings (at-roast1..5.aup3) need Audacity WAV export before they can be annotated and added to the dataset. This is user-side work that unblocks Phase 4 dataset publishing.
+- New mic-2 recordings (4 WAVs in data/raw/, 5th tomorrow) need Label Studio annotation before Phase 4 dataset publishing. Does not block Phase 2 or 3.
 
 ---
 
