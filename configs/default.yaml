@@ -1,0 +1,69 @@
+# Default training configuration for coffee first crack detection
+# Override any value via CLI flags or environment variables
+
+model:
+  base_model: "MIT/ast-finetuned-audioset-10-10-0.4593"
+  num_labels: 2
+  label2id:
+    no_first_crack: 0
+    first_crack: 1
+  id2label:
+    "0": "no_first_crack"
+    "1": "first_crack"
+
+audio:
+  sample_rate: 16000
+  target_length_sec: 10
+  # ASTFeatureExtractor parameters (calibrated on AudioSet)
+  feature_extractor_mean: -4.2677393
+  feature_extractor_std: 4.5689974
+  num_mel_bins: 128
+  max_length: 1024
+
+training:
+  batch_size: 8
+  learning_rate: 5.0e-5
+  num_epochs: 20
+  warmup_steps: 100
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  seed: 42
+  # Cropping mode: random (train) / center (eval)
+  train_crop_mode: random
+  eval_crop_mode: center
+  use_class_weights: true
+  early_stopping_patience: 5
+  # HuggingFace Trainer settings
+  evaluation_strategy: epoch
+  save_strategy: epoch
+  load_best_model_at_end: true
+  metric_for_best_model: f1
+  fp16: false   # set true for CUDA, false for MPS
+  bf16: false   # set true for RTX 4090
+
+dataloader:
+  # MPS: num_workers=0, pin_memory=false
+  # CUDA: num_workers=4, pin_memory=true
+  num_workers: 0
+  pin_memory: false
+
+inference:
+  window_size: 10.0      # seconds
+  overlap: 0.7           # 70% → 3s hop
+  threshold: 0.6
+  min_pops: 5
+  confirmation_window: 20.0  # seconds
+
+export:
+  output_dir: "exports/onnx"
+  opset_version: 14
+  quantize_int8: true
+
+paths:
+  data_dir: "data"
+  splits_dir: "data/splits"
+  processed_dir: "data/processed"
+  labels_dir: "data/labels"
+  raw_dir: "data/raw"
+  experiments_dir: "experiments"
+  exports_dir: "exports"

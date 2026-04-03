@@ -1,0 +1,23 @@
+# Raspberry Pi 5 (ARM64) — inference only
+# No CUDA, no MPS, no training dependencies
+# Install with: pip install -r requirements-pi.txt
+
+# Inference via ONNX Runtime (ARM64 wheel available)
+onnxruntime>=1.17.0  # Use onnxruntime, NOT onnxruntime-gpu
+
+# Audio I/O
+librosa>=0.10.0
+soundfile>=0.12.0
+sounddevice>=0.4.6
+numpy>=1.24.0
+
+# HuggingFace for downloading model config / tokenizer
+huggingface-hub>=0.20.0
+transformers>=4.37.0
+
+# Utilities
+pyyaml>=6.0
+tqdm>=4.66.0
+
+# Note: Do NOT install torch, torchaudio, or optimum on RPi5 unless
+# you specifically need PyTorch CPU inference (ONNX is preferred for speed).
