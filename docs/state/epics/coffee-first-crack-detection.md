@@ -1,7 +1,7 @@
 # Epic: Coffee First Crack Detection — HuggingFace Model Repository
 
 **GitHub Issue**: [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1)
-**Status**: 🟡 In Progress — Phase 1 complete, moving to Phase 2
+**Status**: 🟡 In Progress — Phases 1–3 complete, Phase 4 in progress (S13 remaining)
 **Last Updated**: 2026-04-03
 
 ## Objective
@@ -28,36 +28,34 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
   - `src/coffee_first_crack/utils/metrics.py` and `utils/device.py` created ✅
 
 ### Phase 2 — Training & Evaluation
-- [ ] S5 [#6](https://github.com/syamaner/coffee-first-crack-detection/issues/6): Implement train.py with HF Trainer API (class-weighted loss)
-- [ ] S6 [#7](https://github.com/syamaner/coffee-first-crack-detection/issues/7): Implement evaluate.py with full metrics report
-- [ ] S7 [#8](https://github.com/syamaner/coffee-first-crack-detection/issues/8): Validate training — run locally, verify ~93% accuracy
+- [x] S5 [#6](https://github.com/syamaner/coffee-first-crack-detection/issues/6): Implement train.py with HF Trainer API (class-weighted loss) ✅
+- [x] S6 [#7](https://github.com/syamaner/coffee-first-crack-detection/issues/7): Implement evaluate.py with full metrics report ✅
+- [x] S7 [#8](https://github.com/syamaner/coffee-first-crack-detection/issues/8): Validate training — 95.6% acc, 0.955 F1, 0.978 ROC-AUC (test set) ✅
 
 ### Phase 3 — Inference & Export
-- [ ] S8 [#9](https://github.com/syamaner/coffee-first-crack-detection/issues/9): Port inference.py — sliding window + streaming FirstCrackDetector
-- [ ] S9 [#10](https://github.com/syamaner/coffee-first-crack-detection/issues/10): Implement export_onnx.py (FP32 + INT8 quantized)
-- [ ] S10 [#11](https://github.com/syamaner/coffee-first-crack-detection/issues/11): Create benchmark_platforms.py
+- [x] S8 [#9](https://github.com/syamaner/coffee-first-crack-detection/issues/9): Port inference.py — sliding window + streaming FirstCrackDetector ✅
+- [x] S9 [#10](https://github.com/syamaner/coffee-first-crack-detection/issues/10): Implement export_onnx.py (FP32 + INT8 quantized) ✅
+- [x] S10 [#11](https://github.com/syamaner/coffee-first-crack-detection/issues/11): Create benchmark_platforms.py ✅
 
 ### Phase 4 — Publishing
-- [ ] S11 [#12](https://github.com/syamaner/coffee-first-crack-detection/issues/12): Implement scripts/push_to_hub.py
-- [ ] S12 [#13](https://github.com/syamaner/coffee-first-crack-detection/issues/13): Write HuggingFace model card README.md
-- [ ] S13 [#14](https://github.com/syamaner/coffee-first-crack-detection/issues/14): Create notebooks/quickstart.ipynb
-- [ ] S14 [#15](https://github.com/syamaner/coffee-first-crack-detection/issues/15): Write pytest test suite
+- [x] S11 [#12](https://github.com/syamaner/coffee-first-crack-detection/issues/12): Implement scripts/push_to_hub.py ✅
+- [x] S12 [#13](https://github.com/syamaner/coffee-first-crack-detection/issues/13): Write HuggingFace model card README.md ✅
+- [ ] S13 [#14](https://github.com/syamaner/coffee-first-crack-detection/issues/14): Create notebooks/quickstart.ipynb ← **next**
+- [x] S14 [#15](https://github.com/syamaner/coffee-first-crack-detection/issues/15): Write pytest test suite ✅
 
 ---
 
 ## Active Context
 
-**Current work**: Phase 1 complete. Next: Phase 2 — implement train.py (S5/#6) and evaluate.py (S6/#7).
+**Current work**: S13 — create `notebooks/quickstart.ipynb` (last remaining story).
 
-**Phase 1 delivered (commit e6f8b74)**:
-- Full repo scaffold, pyproject.toml, configs, requirements
-- model.py, dataset.py, utils/device.py, utils/metrics.py
-- AGENTS.md, 4 .claude/skills/, README.md model card
-- docs/data_preparation.md (Label Studio annotation guide)
-- docs/state/ (registry + epic tracking)
+**PRs merged**:
+- PR #16: train.py, evaluate.py, inference.py
+- PR #17: export_onnx.py, benchmark_platforms.py, push_to_hub.py, tests
+- PR #18: input_values key fix, accelerate dep, build backend fix, training validated
 
 **Blockers**:
-- New mic-2 recordings (4 WAVs in data/raw/, 5th tomorrow) need Label Studio annotation before Phase 4 dataset publishing. Does not block Phase 2 or 3.
+- 5 new mic-2 WAV recordings in `data/raw/` need Label Studio annotation before final dataset can be published to HuggingFace. This does not block the notebook.
 
 ---
 
@@ -66,7 +64,7 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 | Run | Accuracy | F1 | Recall (FC) | Notes |
 |-----|----------|----|-------------|-------|
 | Original prototype | ~93% | ~0.93 | 100% | coffee-roasting monorepo, custom Trainer |
-| New repo baseline | — | — | — | Not yet run |
+| baseline_v1 (mic-1 only, MPS) | 95.6% (val) / 91.1% (test) | 0.955 / 0.913 | 95.5% | PR #18, 208 train samples |
 
 ---
 
