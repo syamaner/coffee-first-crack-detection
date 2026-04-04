@@ -1,7 +1,7 @@
 # Epic: Coffee First Crack Detection — HuggingFace Model Repository
 
 **GitHub Issue**: [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1)
-**Status**: 🟡 Phase 6 in progress — S16 ✅ S18 ✅ pending S17 (mic-2 data)
+**Status**: ✅ Complete — all 18 stories done, epic closed
 **Last Updated**: 2026-04-04
 
 ## Objective
@@ -72,7 +72,10 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
   - ✅ Test eval: **97.4% acc / 0.925 F1 / 100% precision / 86.1% recall / 0.982 ROC-AUC**
   - ✅ Full-recording detection latency: 0.0s, 0.3s (mic-1), 27.4s (mic-2) — all detected
   - Hyperparams tuned: lr 5e-5→2e-5, weight_decay 0.01→0.05, early_stopping 5→3
-- [ ] S17 [#24](https://github.com/syamaner/coffee-first-crack-detection/issues/24): Capture mic-2 recordings and expand dataset
+- [x] S17 [#24](https://github.com/syamaner/coffee-first-crack-detection/issues/24): Capture mic-2 recordings and expand dataset ✅
+  - 6 mic-2 recordings captured and annotated (absorbed into S16 dataset expansion)
+  - mic2-brazil-roast1–4, mic2-brazil-santos-roast1–2
+  - Annotation JSONs in `data/labels/`, included in 15-recording 973-chunk dataset
 - [x] S18 [#25](https://github.com/syamaner/coffee-first-crack-detection/issues/25): Add HuggingFace inference Space + widget to model card ✅
   - `widget` block added to README.md frontmatter YAML
   - Two example WAVs uploaded to HF model repo under `audio_examples/` (16kHz, 10s)
@@ -84,7 +87,7 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 
 ## Active Context
 
-**Phase 6 in progress.** S16 (#26) complete. S18 (#25) complete — Gradio Space live, widget examples working.
+**Epic complete.** All 18 stories delivered across 6 phases. Issues #24, #25, #26 closed. Epic issue #1 fully checked off.
 
 **Gradio Space** (S18 / #25): https://huggingface.co/spaces/syamaner/coffee-first-crack-detection
 - Dropdown: "First crack (10s)" / "No first crack (10s)" pre-loaded examples
