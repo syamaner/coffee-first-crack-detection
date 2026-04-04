@@ -1,7 +1,7 @@
 # Epic: Coffee First Crack Detection — HuggingFace Model Repository
 
 **GitHub Issue**: [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1)
-**Status**: 🟡 Phase 6 in progress — data prep complete, retraining with tuned hyperparams
+**Status**: 🟡 Phase 6 in progress — S16 complete, S25 (Spaces UI) in progress
 **Last Updated**: 2026-04-04
 
 ## Objective
@@ -63,7 +63,7 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
   - **INT8 is the recommended model for RPi5** — 2x faster than FP32, zero quality loss
 
 ### Phase 6 — Dataset Expansion & Retraining
-- [ ] S16 [#26](https://github.com/syamaner/coffee-first-crack-detection/issues/26): Unified data preparation pipeline with fixed-size chunking
+- [x] S16 [#26](https://github.com/syamaner/coffee-first-crack-detection/issues/26): Unified data preparation pipeline with fixed-size chunking
   - ✅ New `data_prep` module: `convert_labelstudio_export.py`, `chunk_audio.py`, `dataset_splitter.py`
   - ✅ All 15 files re-annotated with single-region approach in Label Studio
   - ✅ Chunking: 973 chunks (197 FC / 776 NFC, ~20% first_crack), fixed 10s windows
@@ -73,12 +73,16 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
   - ✅ Full-recording detection latency: 0.0s, 0.3s (mic-1), 27.4s (mic-2) — all detected
   - Hyperparams tuned: lr 5e-5→2e-5, weight_decay 0.01→0.05, early_stopping 5→3
 - [ ] S17 [#24](https://github.com/syamaner/coffee-first-crack-detection/issues/24): Capture mic-2 recordings and expand dataset
+- [x] S18 [#25](https://github.com/syamaner/coffee-first-crack-detection/issues/25): Add HuggingFace inference widget to model card ✅
+  - `widget` block added to README.md frontmatter YAML
+  - Two example WAVs uploaded to HF model repo under `audio_examples/` (16kHz, 10s)
+  - Built-in HF Inference Providers widget enabled on model card
 
 ---
 
 ## Active Context
 
-**Phase 6 in progress.** S16 (#26) — data prep + training + evaluation complete.
+**Phase 6 in progress.** S16 (#26) complete (merged). S18 (#25) complete — HF inference widget live on model card.
 
 **Dataset v2**: 973 fixed 10s chunks from 15 recordings (9 legacy + 6 mic2)
 - 197 first_crack (~20%) / 776 no_first_crack (~80%)
