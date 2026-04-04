@@ -158,7 +158,7 @@ sess = rt.InferenceSession(
 )
 
 audio, _ = librosa.load("roast.wav", sr=16000, mono=True)
-inputs = extractor(audio.tolist(), sampling_rate=16000, return_tensors="np")
+inputs = extractor([audio.tolist()], sampling_rate=16000, return_tensors="np")
 logits = sess.run(None, {sess.get_inputs()[0].name: inputs["input_values"]})[0]
 
 # Softmax for probabilities

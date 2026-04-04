@@ -107,6 +107,7 @@ def _resolve_model(
         raise ValueError("Either --onnx-dir or --repo-id must be specified")
 
     from huggingface_hub import hf_hub_download
+    from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
 
     # Try quantized first, fall back to non-quantized
     for filename in ("model_quantized.onnx", "model.onnx"):
@@ -117,8 +118,16 @@ def _resolve_model(
             )
             print(f"Downloaded {filename} from {repo_id}/{subfolder}")
             break
-        except Exception:  # noqa: BLE001
+        except EntryNotFoundError:
             continue
+        except RepositoryNotFoundError as exc:
+            raise RuntimeError(
+                f"Repository {repo_id!r} was not found or is not accessible"
+            ) from exc
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to download {filename} from {repo_id}/{subfolder}: {exc}"
+            ) from exc
     else:
         raise FileNotFoundError(
             f"No ONNX model found in {repo_id}/{subfolder} (tried model_quantized.onnx, model.onnx)"

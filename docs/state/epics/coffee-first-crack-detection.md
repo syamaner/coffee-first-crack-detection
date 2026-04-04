@@ -82,7 +82,7 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 - Quality: 93.3% acc / 0.933 F1 — identical to Mac across all ONNX variants
 - **Production config**: INT8, 2 threads, threshold=0.90, adequate PSU + fan → **p50 = 2,452ms**
 - 2 threads chosen to leave 2 cores free for MCP server + agent UI running on the same Pi
-- Threshold 0.90: precision=0.952, recall=0.909, F1=0.930 — only 1 FP on test set
+- Threshold 0.90: precision=0.952, recall=0.909, F1=0.930 — intentional production tradeoff (sweep script recommends 0.95 for zero FPs, but 0.90 preserves higher recall with only 1 FP)
 - Threshold sweep + parameter simulation completed — see `results/` for full data
 - ONNX inference module (`inference_onnx.py`) loads models from HF Hub with `--profile pi_inference`
 - Latency breakdown: feature extraction 49ms (2%), ONNX model inference 2,019ms (98%)

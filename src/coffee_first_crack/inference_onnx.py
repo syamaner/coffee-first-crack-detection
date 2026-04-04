@@ -116,9 +116,13 @@ def _resolve_onnx_model(
                 filename=f"{subfolder}/{filename}",
             )
             return path
-        except (EntryNotFoundError, RepositoryNotFoundError):
+        except EntryNotFoundError:
             # Expected when trying alternative filenames — continue to next
             continue
+        except RepositoryNotFoundError as exc:
+            raise RuntimeError(
+                f"Repository {repo_id!r} was not found or is not accessible"
+            ) from exc
         except Exception as exc:
             # Network errors, auth issues, etc. — propagate immediately
             raise RuntimeError(
