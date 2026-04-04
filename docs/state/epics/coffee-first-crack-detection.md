@@ -2,7 +2,7 @@
 
 **GitHub Issue**: [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1)
 **Status**: ✅ Complete — all 14 stories done
-**Last Updated**: 2026-04-03
+**Last Updated**: 2026-04-04
 
 ## Objective
 Create a standalone, HuggingFace-publishable repository for training, evaluating, and publishing the coffee first crack audio detection model. Extracted from the `coffee-roasting` monorepo. Targets M3+ Mac (MPS), RTX 4090 (CUDA), and Raspberry Pi 5 (ONNX/CPU).
