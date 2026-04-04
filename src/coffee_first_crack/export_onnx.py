@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+
 from coffee_first_crack.model import build_feature_extractor
 
 
@@ -26,7 +27,6 @@ def export_onnx(
     model_dir: str | Path,
     output_dir: str | Path,
     quantize: bool = True,
-    opset_version: int = 14,
 ) -> dict[str, Path]:
     """Export a fine-tuned AST model to ONNX.
 
@@ -34,7 +34,6 @@ def export_onnx(
         model_dir: Path to ``save_pretrained`` checkpoint or HuggingFace model ID.
         output_dir: Directory to write ONNX files.
         quantize: If ``True``, also produce an INT8 quantized variant.
-        opset_version: ONNX opset version (default: 14).
 
     Returns:
         Dict with keys ``"fp32"`` (and optionally ``"int8"``) mapping to output paths.
@@ -42,9 +41,7 @@ def export_onnx(
     try:
         from optimum.onnxruntime import ORTModelForAudioClassification
     except ImportError as exc:
-        raise ImportError(
-            "Install optimum: pip install 'optimum[onnxruntime]'"
-        ) from exc
+        raise ImportError("Install optimum: pip install 'optimum[onnxruntime]'") from exc
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -58,7 +55,6 @@ def export_onnx(
     ort_model = ORTModelForAudioClassification.from_pretrained(
         model_dir,
         export=True,
-        opset=opset_version,
     )
     fp32_dir = output_dir / "fp32"
     fp32_dir.mkdir(exist_ok=True)
@@ -73,11 +69,9 @@ def export_onnx(
     if quantize:
         print("\nApplying INT8 dynamic quantization (portable, ARM64-compatible)...")
         try:
-            from onnxruntime.quantization import quantize_dynamic, QuantType
+            from onnxruntime.quantization import QuantType, quantize_dynamic
         except ImportError as exc:
-            raise ImportError(
-                "Install onnxruntime: pip install onnxruntime"
-            ) from exc
+            raise ImportError("Install onnxruntime: pip install onnxruntime") from exc
 
         int8_dir = output_dir / "int8"
         int8_dir.mkdir(exist_ok=True)
@@ -185,11 +179,15 @@ def main() -> None:
     """CLI entry point for ONNX export."""
     parser = argparse.ArgumentParser(description="Export first crack model to ONNX")
     parser.add_argument(
-        "--model-dir", type=str, required=True,
+        "--model-dir",
+        type=str,
+        required=True,
         help="save_pretrained checkpoint dir or HuggingFace model ID",
     )
     parser.add_argument(
-        "--output-dir", type=Path, default=Path("exports/onnx"),
+        "--output-dir",
+        type=Path,
+        default=Path("exports/onnx"),
         help="Output directory (default: exports/onnx)",
     )
     parser.add_argument(
@@ -199,12 +197,9 @@ def main() -> None:
         help="Produce INT8 quantized variant (default: True, use --no-quantize to skip)",
     )
     parser.add_argument(
-        "--benchmark", action="store_true",
+        "--benchmark",
+        action="store_true",
         help="Run latency benchmark after export",
-    )
-    parser.add_argument(
-        "--opset", type=int, default=14,
-        help="ONNX opset version (default: 14)",
     )
     args = parser.parse_args()
 
@@ -212,7 +207,6 @@ def main() -> None:
         model_dir=args.model_dir,
         output_dir=args.output_dir,
         quantize=args.quantize,
-        opset_version=args.opset,
     )
 
     if args.benchmark:

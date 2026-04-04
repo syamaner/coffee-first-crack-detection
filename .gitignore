@@ -210,8 +210,9 @@ __marimo__/
 data/
 experiments/
 exports/
+results/*.log
 venv/
-*.pt
 *.onnx
 *.safetensors
 runs/
+docs/notes.md

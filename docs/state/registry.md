@@ -4,7 +4,7 @@
 
 | Epic | GitHub Issue | Status | Phase |
 |------|-------------|--------|-------|
-| Coffee First Crack Detection — HuggingFace Model Repository | [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1) | 🟡 In Progress | Phase 1 |
+| Coffee First Crack Detection — HuggingFace Model Repository | [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1) | 🟡 In Progress | Phase 5 complete, pending dataset expansion |
 
 ## Links
 - GitHub Repo: https://github.com/syamaner/coffee-first-crack-detection

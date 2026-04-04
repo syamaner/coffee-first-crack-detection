@@ -128,20 +128,49 @@ detector.start()
 
 ### ONNX (Raspberry Pi 5)
 
+ONNX models are published on HuggingFace Hub under `onnx/fp32/` and `onnx/int8/`:
+- **INT8 (recommended)**: `onnx/int8/model_quantized.onnx` — 90MB, 2x faster, zero quality loss
+- **FP32**: `onnx/fp32/model.onnx` — 345MB
+
 ```python
 import onnxruntime as rt
 import numpy as np
+from huggingface_hub import hf_hub_download
 from transformers import ASTFeatureExtractor
 import librosa
 
-extractor = ASTFeatureExtractor.from_pretrained("syamaner/coffee-first-crack-detection")
-sess = rt.InferenceSession("model_quantized.onnx")
+# Download INT8 model and preprocessor config from HF Hub
+model_path = hf_hub_download(
+    repo_id="syamaner/coffee-first-crack-detection",
+    filename="onnx/int8/model_quantized.onnx",
+)
+extractor = ASTFeatureExtractor.from_pretrained(
+    "syamaner/coffee-first-crack-detection", subfolder="onnx/int8",
+)
+
+# Thread-limit for RPi5 (2 threads — leaves cores free for MCP server + UI)
+sess_options = rt.SessionOptions()
+sess_options.intra_op_num_threads = 2
+sess_options.inter_op_num_threads = 1
+
+sess = rt.InferenceSession(
+    model_path, sess_options=sess_options, providers=["CPUExecutionProvider"]
+)
 
 audio, _ = librosa.load("roast.wav", sr=16000, mono=True)
-inputs = extractor(audio.tolist(), sampling_rate=16000, return_tensors="np")
-logits = sess.run(None, {"input_features": inputs["input_features"]})[0]
-label_id = logits.argmax()
+inputs = extractor([audio.tolist()], sampling_rate=16000, return_tensors="np")
+logits = sess.run(None, {sess.get_inputs()[0].name: inputs["input_values"]})[0]
+
+# Softmax for probabilities
+exp_logits = np.exp(logits - np.max(logits, axis=-1, keepdims=True))
+probs = exp_logits / exp_logits.sum(axis=-1, keepdims=True)
+label_id = int(np.argmax(probs))
+print(f"first_crack prob: {probs[0, 1]:.3f}")
 ```
+
+> **Note**: RPi5 requires adequate PSU (5V/5A recommended) and active cooling.
+> Default is 2 ONNX threads to leave CPU headroom for MCP server and agent UI.
+> See [Hardware Requirements](#hardware-requirements).
 
 ---
 
@@ -185,16 +214,30 @@ Full dataset: 298 × 10 s chunks, 208 / 45 / 45 train / val / test split.
 - Microphone quality matters: model trained on two different microphones (mic-1-original, mic-2-new)
 - No second crack detection — model is binary only
 - Not validated in commercial roasting environments
+- AST model (87M params) is too large for real-time (<500ms) inference on Raspberry Pi 5 — achieves ~2.07s per 10s window with INT8 quantization at 4 threads (with fan)
 
 ---
 
 ## Hardware Requirements
 
-| Platform | Inference | Notes |
-|----------|-----------|-------|
-| Apple M3+ Mac | PyTorch (MPS) | < 100ms / 10s window |
-| NVIDIA RTX 4090 | PyTorch (CUDA) | < 30ms / 10s window |
-| Raspberry Pi 5 (16GB) | ONNX Runtime (CPU) | < 500ms / 10s window, use `model_quantized.onnx` |
+| Platform | Inference | Latency (10s window) | Model Size | Notes |
+|----------|-----------|---------------------|------------|-------|
+| Apple M3+ Mac | PyTorch (MPS) | ~100ms | 345MB | Auto-detected device |
+| Apple M3+ Mac | ONNX Runtime (CPU) | ~197ms (INT8) / ~375ms (FP32) | 90MB / 345MB | No GPU needed |
+| NVIDIA RTX 4090 | PyTorch (CUDA) | ~30ms | 345MB | fp16/bf16, num_workers=4 |
+| Raspberry Pi 5 (16GB) | ONNX Runtime (CPU) | ~2.45s (INT8, 2 threads) | 90MB | ⭐ Recommended Pi config |
+
+### Raspberry Pi 5 Notes
+
+- Use `model_quantized.onnx` (INT8, 90MB) — 2x faster than FP32 with zero quality loss
+- **Recommended config**: INT8, 2 threads, adequate PSU + active cooler → **p50 = 2,452ms**
+- **Why 2 threads**: the Pi also runs an MCP server and agent UI — 2 ONNX threads leaves 2 cores free for those services
+- **Detection threshold**: 0.90 (precision=0.952, recall=0.909, F1=0.930) — minimises false positives
+- **Power**: adequate PSU (5V/5A recommended) required for multi-thread. Standard chargers (5V/3A) cause under-voltage crashes under load
+- **Cooling**: active cooler recommended — sustained 2-thread load without fan reaches 77°C+ and triggers thermal throttling
+- **Threads**: 2 threads with fan (2,452ms), 4 threads with fan (2,070ms), 1 thread on any PSU (4,441ms)
+- **Latency target**: current AST model (87M params) does not meet the <500ms target on RPi5. Consider a lighter model for real-time edge use
+- Install: `pip install -r requirements-pi.txt` then `pip install torch --index-url https://download.pytorch.org/whl/cpu`
 
 ---
 

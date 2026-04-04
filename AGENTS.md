@@ -94,14 +94,28 @@ python -c "import sounddevice as sd; print(sd.query_devices())"
 
 ### ONNX Export (for Raspberry Pi 5)
 ```bash
-bash scripts/export_onnx.sh experiments/baseline_v1/checkpoint-best
-# or
 python -m coffee_first_crack.export_onnx \
   --model-dir experiments/baseline_v1/checkpoint-best \
-  --output-dir exports/onnx --quantize
+  --output-dir exports/onnx --quantize --benchmark
 ```
 
-### Benchmark
+### ONNX Evaluation (no PyTorch inference — works on RPi5)
+```bash
+# Evaluate INT8 model on test split
+python scripts/evaluate_onnx.py \
+  --onnx-dir exports/onnx/int8 \
+  --test-dir data/splits/test \
+  --output results/eval.json \
+  --threads 2  # default: 2 on ARM64, auto on x86
+
+# Latency benchmark with dummy audio
+python scripts/benchmark_onnx_pi.py \
+  --onnx-dir exports/onnx \
+  --n-runs 30 \
+  --output results/latency.json
+```
+
+### Benchmark (PyTorch + ONNX, Mac/GPU only)
 ```bash
 python scripts/benchmark_platforms.py \
   --model-dir experiments/baseline_v1/checkpoint-best \
@@ -147,6 +161,11 @@ src/coffee_first_crack/
     convert_labelstudio_export.py  — Label Studio JSON → per-file annotation JSON
     chunk_audio.py                 — annotated WAV → 10s chunks under data/processed/
     dataset_splitter.py            — stratified train/val/test split
+scripts/
+  evaluate_onnx.py     — ONNX-only test-set evaluation (no PyTorch inference dep)
+  benchmark_onnx_pi.py — ONNX-only latency benchmark (dummy audio, no I/O variance)
+  benchmark_platforms.py — PyTorch + ONNX benchmark (Mac/GPU only)
+  push_to_hub.py       — publish model + dataset to HuggingFace Hub
 ```
 
 **Key design decisions:**
@@ -154,7 +173,8 @@ src/coffee_first_crack/
 - WeightedLossTrainer overrides `compute_loss()` for class-weighted CrossEntropyLoss
 - ASTFeatureExtractor params fixed: mean=-4.2677393, std=4.5689974, 128 mel bins, 16kHz
 - MPS: `num_workers=0`, `pin_memory=False`; CUDA: `num_workers=4`, `pin_memory=True`
-- RPi5: ONNX Runtime only (no training), INT8 quantized model for <500ms/window
+- RPi5: ONNX Runtime for inference, INT8 quantized model (90MB). PyTorch CPU still needed for ASTFeatureExtractor filterbank computation.
+- RPi5 thread limiting: `--threads 2` default on ARM64 to prevent under-voltage crashes with standard 5V/3A PSUs
 
 **Pointers to key docs:**
 - Data pipeline step-by-step: `docs/data_preparation.md`
@@ -187,6 +207,14 @@ After completing a story:
 
 | Platform | Device | Train | Infer | Notes |
 |----------|--------|-------|-------|-------|
-| Apple M3+ Mac | MPS | ✅ | ✅ | num_workers=0, pin_memory=False |
+| Apple M3+ Mac | MPS | ✅ | ✅ | num_workers=0, pin_memory=False, ~197ms INT8 ONNX |
 | Ubuntu + RTX 4090 | CUDA | ✅ | ✅ | fp16/bf16, num_workers=4, pin_memory=True |
-| Raspberry Pi 5 (16GB) | CPU | ❌ | ✅ | ONNX Runtime only, INT8 model |
+| Raspberry Pi 5 (16GB) | CPU | ❌ | ✅ | ONNX Runtime, INT8 model, ~2.4s @ 2 threads |
+
+### RPi5 Hardware Requirements
+- **PSU**: Official RPi5 27W (5V/5A) USB-C — standard chargers (5V/3A incl. Apple 96W) cause under-voltage crashes
+- **Cooling**: Active cooler mandatory — sustained inference hits 77°C+ without it
+- **Storage**: NVMe (Gen 2 default) works fine
+- **Threads**: Default 2 via `--threads` flag; 4 threads needs 27W PSU + active cooler
+- **Python**: 3.11+ (tested with 3.13.5)
+- **Install**: `pip install -r requirements-pi.txt` + `pip install torch --index-url https://download.pytorch.org/whl/cpu`

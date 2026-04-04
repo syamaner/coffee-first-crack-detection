@@ -1,0 +1,28 @@
+{
+  "model": "model_quantized.onnx",
+  "model_size_mb": 89.9,
+  "threads": 4,
+  "n_samples": 45,
+  "accuracy": 0.9333,
+  "f1": 0.9333,
+  "precision": 0.913,
+  "recall_first_crack": 0.9545,
+  "roc_auc": 0.9881,
+  "confusion_matrix": [
+    [
+      21,
+      2
+    ],
+    [
+      1,
+      21
+    ]
+  ],
+  "latency": {
+    "p50_ms": 2068.167663999702,
+    "p95_ms": 2083.983413399801,
+    "mean_ms": 2069.937187933303,
+    "min_ms": 2049.3929379999827,
+    "max_ms": 2126.756276999913
+  }
+}

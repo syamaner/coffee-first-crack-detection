@@ -54,9 +54,28 @@ inference:
   min_pops: 5
   confirmation_window: 20.0  # seconds
 
+# Raspberry Pi 5 inference profile — optimised for ~2.5s/window ONNX latency.
+# Use via inference_onnx.py --profile pi_inference
+# The Pi also runs an MCP server and agent UI, so we limit to 2 ONNX threads
+# to leave 2 cores free for those services.
+pi_inference:
+  window_size: 10.0      # seconds (matches training window)
+  overlap: 0.3           # 30% → 7s hop — comfortable margin for 2-thread latency (~2.5s)
+  threshold: 0.90        # high threshold to minimise false positives (precision=0.952)
+  min_pops: 3            # ~4 windows in 30s at 7s hop → need 3/4 positive (75%)
+  confirmation_window: 30.0  # seconds — wider window to compensate for fewer windows/sec
+  onnx_threads: 2        # 2 of 4 cores — leaves headroom for MCP server + agent UI
+  # Rationale:
+  #   Pi runs: ONNX inference (2 threads) + MCP server + agent UI
+  #   2 threads @ 2,452ms inference → 7s hop gives 4.5s idle per cycle (64% headroom)
+  #   0.90 threshold: precision=0.952, recall=0.909, F1=0.930 — only 1 FP on test set
+  #   ~4 windows in 30s → need 3/4 positive for confirmation
+  #   Worst-case detection delay: ~21s (3rd positive × 7s hop)
+  #   First crack phase lasts 2-3 minutes so 21s delay is acceptable
+  #   Requires adequate PSU (5V/5A) + active cooling for stable 2-thread operation
+
 export:
   output_dir: "exports/onnx"
-  opset_version: 14
   quantize_int8: true
 
 paths:

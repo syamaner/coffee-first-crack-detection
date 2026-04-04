@@ -1,7 +1,7 @@
 # Epic: Coffee First Crack Detection — HuggingFace Model Repository
 
 **GitHub Issue**: [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1)
-**Status**: ✅ Repository complete — pending dataset annotation & retraining
+**Status**: ✅ Phases 1–5 complete — pending dataset annotation, retraining & Pi hardware
 **Last Updated**: 2026-04-04
 
 ## Objective
@@ -46,17 +46,53 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
   - Sliding-window demo with assembled roast recording and probability timeline plot
 - [x] S14 [#15](https://github.com/syamaner/coffee-first-crack-detection/issues/15): Write pytest test suite ✅
 
+### Phase 5 — Edge Validation
+- [x] S15 [#22](https://github.com/syamaner/coffee-first-crack-detection/issues/22): Validate ONNX inference on Raspberry Pi 5 ✅
+  - ONNX export: FP32 (345MB) + INT8 quantized (90MB)
+  - Created `scripts/evaluate_onnx.py` and `scripts/benchmark_onnx_pi.py` (ONNX-only, no PyTorch for inference)
+  - Added `--threads` param for power-limited ARM64 devices
+  - Quality: 93.3% acc / 0.933 F1 — identical across FP32/INT8 and Mac/RPi5 (zero quantization loss)
+  - Latency (INT8): 2.1s @ 4 threads (with fan) / 2.4s @ 2 threads / 4.4s @ 1 thread
+  - Latency breakdown: feature extraction 49ms (2%), ONNX inference 2,019ms (98%)
+  - Fixed `export_onnx.py` for current `optimum` API (removed deprecated `opset` param)
+  - Hardware findings:
+    - RPi5 crashes with >1 ONNX thread on 5V/3A PSU (`throttled=0x50000` — under-voltage)
+    - No active cooling: idle 47°C → 77°C under load → thermal throttling (`throttled=0xe0000`)
+    - With fan: 4 threads stable at 45°C, no throttling, consistent ~2.1s
+    - Requires adequate PSU + active cooler for production use
+  - **INT8 is the recommended model for RPi5** — 2x faster than FP32, zero quality loss
+
 ---
 
 ## Active Context
 
-**All 14 stories complete.** Repository, model card, and quickstart notebook shipped.
+**All 14 stories + RPi5 validation (S15) complete.** 15 stories across 5 phases.
 
 **Model on HuggingFace**: https://huggingface.co/syamaner/coffee-first-crack-detection
 - baseline_v1: 91.1% test acc / 0.913 F1 / 95.5% first_crack recall / 0.978 ROC-AUC
 - Trained on mic-1 only (298 chunks, 6 roasts)
 
+**ONNX Models**: exported from baseline_v1 checkpoint, **published to HuggingFace Hub** (2026-04-04)
+- FP32: 345MB → `onnx/fp32/model.onnx` on HF Hub
+- INT8: 90MB → `onnx/int8/model_quantized.onnx` on HF Hub — recommended for RPi5
+- Config JSONs (`config.json`, `preprocessor_config.json`) also uploaded for `from_pretrained()` support
+- Zero quality degradation from quantization (identical confusion matrix)
+
+**RPi5 Validation** (issue #22, branch `feature/22-rpi5-onnx-validation`):
+- Quality: 93.3% acc / 0.933 F1 — identical to Mac across all ONNX variants
+- **Production config**: INT8, 2 threads, threshold=0.90, adequate PSU + fan → **p50 = 2,452ms**
+- 2 threads chosen to leave 2 cores free for MCP server + agent UI running on the same Pi
+- Threshold 0.90: precision=0.952, recall=0.909, F1=0.930 — intentional production tradeoff (sweep script recommends 0.95 for zero FPs, but 0.90 preserves higher recall with only 1 FP)
+- Threshold sweep + parameter simulation completed — see `results/` for full data
+- ONNX inference module (`inference_onnx.py`) loads models from HF Hub with `--profile pi_inference`
+- Latency breakdown: feature extraction 49ms (2%), ONNX model inference 2,019ms (98%)
+- The AST model (87M params) is the bottleneck — too large for <500ms on RPi5 ARM64 CPU
+- Hardware requirements: adequate PSU + active cooler for stable 2-thread operation
+- See "RPi5 Validation Results" section below for full breakdown
+
 **Dataset**: NOT yet published — pending annotation of mic-2 recordings.
+
+**Blog series**: planned 3-part series covering training, MCP servers, and .NET Aspire agent.
 
 ---
 
@@ -102,6 +138,57 @@ python scripts/push_to_hub.py \
 |-----|----------|----|-------------|-------|
 | Original prototype | ~93% | ~0.93 | 100% | coffee-roasting monorepo, custom Trainer |
 | baseline_v1 (mic-1 only, MPS) | 95.6% (val) / 91.1% (test) | 0.955 / 0.913 | 95.5% | PR #18, 208 train samples |
+| ONNX FP32 (Mac, auto threads) | 93.3% | 0.933 | 95.5% | p50=375ms ✅ |
+| ONNX INT8 (Mac, auto threads) | 93.3% | 0.933 | 95.5% | p50=197ms ✅ |
+| ONNX INT8 (RPi5, 4 threads, fan) | 93.3% | 0.933 | 95.5% | p50=2,070ms ⭐ recommended |
+| ONNX INT8 (RPi5, 2 threads) | 93.3% | 0.933 | 95.5% | p50=2,436ms ⚠️ thermal throttled |
+| ONNX INT8 (RPi5, 1 thread) | 93.3% | 0.933 | 95.5% | p50=4,441ms ⚠️ |
+| ONNX FP32 (RPi5, 1 thread) | 93.3% | 0.933 | 95.5% | p50=9,412ms ⚠️ |
+
+### RPi5 Validation Results
+
+Tested on RPi5 Model B Rev 1.1 (16GB), aarch64, Python 3.13.5, ONNX Runtime 1.24.4.
+
+| Model | Threads | Fan | p50 (ms) | p95 (ms) | Temp | Throttled | Status |
+|-------|---------|-----|----------|----------|------|-----------|--------|
+| INT8 (RPi5) | 4 | ✅ | 2,070 | 2,090 | 45°C | No | ⭐ recommended |
+| INT8 (RPi5) | 2 | ❌ | 2,436 | 2,704 | 77°C | Yes (thermal) | stable but throttled |
+| INT8 (RPi5) | 1 | ❌ | 4,441 | 4,464 | — | No | stable, any PSU |
+| FP32 (RPi5) | 1 | ❌ | 9,412 | 9,484 | — | No | stable, any PSU |
+| INT8 (Mac) | auto | — | 197 | 200 | — | No | ✅ PASS |
+| FP32 (Mac) | auto | — | 375 | 379 | — | No | ✅ PASS |
+
+### Latency Breakdown (INT8, 4 threads, RPi5)
+
+| Stage | Time (ms) | % of Total |
+|-------|-----------|------------|
+| Feature extraction (ASTFeatureExtractor) | 49 | 2% |
+| ONNX model inference | 2,019 | 98% |
+| **Total** | **2,068** | **100%** |
+
+Feature extraction is negligible. The bottleneck is entirely in the ONNX model forward pass (87M parameters through transformer layers).
+
+### RPi5 Hardware Findings
+
+- **Power**: 5V/3A PSU causes under-voltage crashes (`throttled=0x50000`) at >1 ONNX thread. Adequate PSU needed for multi-thread.
+- **Thermal (no fan)**: idle 47°C → 77°C under 2-thread load → thermal throttling (`throttled=0xe0000`). Latency degrades from 2.4s to 2.7s.
+- **Thermal (with fan)**: 4 threads stable at 45°C, no throttling, consistent latency.
+- **Stability**: 1 thread stable on any PSU; 2+ threads need adequate PSU; 4 threads need adequate PSU + fan.
+- **NVMe**: Boot from NVMe (Gen 2, default) — no PCIe stability issues observed.
+- **Recommended config**: INT8 model, 2 threads (leaves cores for MCP/UI), threshold=0.90, adequate PSU + active cooler.
+
+### Latency Analysis & Next Steps
+
+- **INT8 is the go-to model for RPi5** — 2x faster than FP32, zero quality loss, 4x smaller (90MB vs 345MB)
+- RPi5 is ~10x slower than Mac (M-series) for the same INT8 model
+- 2→4 threads gives only ~15% improvement — diminishing returns from parallelism at this model size
+- **Root cause**: AST model has 87M parameters — the transformer forward pass dominates (98% of latency)
+- Feature extraction (2%) is not worth optimizing
+- **Options for <500ms on RPi5**:
+  1. Smaller model architecture (MobileNetV3/YAMNet-based — ~3-5M params, estimated ~50-100ms on Pi)
+  2. Knowledge distillation from AST into a lightweight student model
+  3. Offload inference to companion device (Mac/PC) via network/MCP
+  4. Use RPi5 as audio capture + streaming, with inference on a more powerful device
 
 ---
 
@@ -112,3 +199,11 @@ python scripts/push_to_hub.py \
 - data/ is .gitignored — large audio files go to HuggingFace Datasets only
 - RPi5 is inference-only via ONNX Runtime (no training)
 - AGENTS.md is the single project rules file (no WARP.md)
+- INT8 dynamic quantization (portable, ARM64-compatible) — zero accuracy loss vs FP32
+- ONNX-only scripts (`evaluate_onnx.py`, `benchmark_onnx_pi.py`) avoid 148MB PyTorch install on Pi for model inference, though PyTorch CPU is still needed for `ASTFeatureExtractor` filterbank computation
+- Thread limiting (`--threads` flag, default 2 on ARM64) is essential for RPi5 stability with standard PSUs
+- RPi5 requires adequate PSU for multi-thread — standard USB-C chargers (even 96W Apple) only provide 5V/3A
+- Active cooling recommended for 2+ thread inference — mandatory for 4-thread
+- Production Pi runs MCP server + agent UI alongside inference — 2 ONNX threads leaves 2 cores free
+- Detection threshold 0.90 chosen from threshold sweep: best F1/FP tradeoff (precision=0.952, 1 FP on 45-sample test set)
+- Feature extraction is only 2% of total latency — optimizing it (e.g. C++ STFT) would be wasteful
