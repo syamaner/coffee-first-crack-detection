@@ -44,10 +44,10 @@ class SimulationResult:
     hop_sec: float
     windows_per_confirmation: int
     detection_triggered: bool
+    # Seconds from the first true-positive sample to confirmed detection.
     detection_delay_sec: float | None
-    """Seconds from the first true-positive sample to confirmed detection."""
     true_positives_detected: int
-    false_positives_in_window: int
+    total_false_positives: int
     missed_detections: int
     first_crack_samples: int
     no_first_crack_samples: int
@@ -124,7 +124,7 @@ def _simulate_sequence(
             round(detection_delay_sec, 2) if detection_delay_sec is not None else None
         ),
         true_positives_detected=first_crack_samples - missed,
-        false_positives_in_window=false_positives,
+        total_false_positives=false_positives,
         missed_detections=missed,
         first_crack_samples=first_crack_samples,
         no_first_crack_samples=no_first_crack_samples,
@@ -197,7 +197,7 @@ def simulate(
         line1 = f"  {r.threshold:5.2f}  {r.overlap:7.2f}  {r.min_pops:4d}"
         line2 = f"  {r.confirmation_window:7.1f}  {r.hop_sec:6.1f}"
         line3 = f"  {r.windows_per_confirmation:6d}  {detect_str:>6s}"
-        line4 = f"  {delay_str:>8s}  {r.false_positives_in_window:4d}"
+        line4 = f"  {delay_str:>8s}  {r.total_false_positives:4d}"
         line5 = f"  {r.missed_detections:6d}"
         print(f"{line1}{line2}{line3}{line4}{line5}")
 
@@ -206,7 +206,7 @@ def simulate(
     if triggered:
         best = min(
             triggered,
-            key=lambda r: (r.false_positives_in_window, r.detection_delay_sec or float("inf")),
+            key=lambda r: (r.total_false_positives, r.detection_delay_sec or float("inf")),
         )
         print(
             f"\nBest candidate: threshold={best.threshold}, overlap={best.overlap}, "
@@ -214,7 +214,7 @@ def simulate(
         )
         print(
             f"  Detection delay: {best.detection_delay_sec}s, "
-            f"FPs: {best.false_positives_in_window}, "
+            f"FPs: {best.total_false_positives}, "
             f"Missed: {best.missed_detections}"
         )
     else:

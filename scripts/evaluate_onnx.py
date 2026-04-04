@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Evaluate an ONNX model on the test split — no PyTorch dependency.
+"""Evaluate an ONNX model on the test split — no PyTorch model inference dependency.
 
-Designed to run on Raspberry Pi 5 with only ``requirements-pi.txt`` installed.
-Walks ``data/splits/test/{first_crack,no_first_crack}/`` to infer ground-truth
+Designed to run on Raspberry Pi 5 with ``requirements-pi.txt`` installed.
+CPU-only PyTorch is still required for ``ASTFeatureExtractor`` filterbank
+computation during feature extraction, but model inference runs through
+ONNX Runtime rather than PyTorch.  The script walks
+``data/splits/test/{first_crack,no_first_crack}/`` to infer ground-truth
 labels from directory names, runs each WAV through the ONNX model, and reports
 accuracy, F1, precision, recall, confusion matrix, and per-window latency.
 

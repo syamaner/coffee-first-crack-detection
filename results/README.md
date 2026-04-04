@@ -66,7 +66,7 @@ ROC-AUC = 0.988 across all thresholds.
 | 0.80–0.90 | 93.3% | 0.952 | 0.909 | 0.930 | 1 | 2 |
 | 0.95 | 88.9% | 1.000 | 0.773 | 0.872 | 0 | 5 |
 
-**Chosen Pi threshold: 0.75** — best balance of FP reduction (1 FP) and recall.
+**Chosen Pi threshold: 0.90** — reduces false positives to 1 while preserving 0.909 recall and 0.930 F1, matching the repository Pi inference config.
 
 ## Final HF Hub Evaluations (INT8, RPi5)
 

@@ -200,11 +200,15 @@ class OnnxSlidingWindowInference:
     ) -> None:
         cfg = _load_profile(profile)
 
-        self.window_size = window_size or cfg.get("window_size", 10.0)
-        self.overlap = overlap or cfg.get("overlap", 0.7)
-        self.threshold = threshold or cfg.get("threshold", 0.6)
-        self.min_pops = min_pops or cfg.get("min_pops", 5)
-        self.confirmation_window = confirmation_window or cfg.get("confirmation_window", 20.0)
+        self.window_size = cfg.get("window_size", 10.0) if window_size is None else window_size
+        self.overlap = cfg.get("overlap", 0.7) if overlap is None else overlap
+        self.threshold = cfg.get("threshold", 0.6) if threshold is None else threshold
+        self.min_pops = cfg.get("min_pops", 5) if min_pops is None else min_pops
+        self.confirmation_window = (
+            cfg.get("confirmation_window", 20.0)
+            if confirmation_window is None
+            else confirmation_window
+        )
         self.sample_rate = SAMPLE_RATE
         self.window_samples = int(self.window_size * self.sample_rate)
         self.hop_samples = int(self.window_samples * (1 - self.overlap))
@@ -337,12 +341,16 @@ class OnnxFirstCrackDetector:
         self.audio_file = Path(audio_file) if audio_file else None
         self.use_microphone = use_microphone
         self.device_index = device_index
-        self.window_size = window_size or cfg.get("window_size", 10.0)
-        self.overlap = overlap or cfg.get("overlap", 0.7)
-        self.threshold = threshold or cfg.get("threshold", 0.6)
+        self.window_size = cfg.get("window_size", 10.0) if window_size is None else window_size
+        self.overlap = cfg.get("overlap", 0.7) if overlap is None else overlap
+        self.threshold = cfg.get("threshold", 0.6) if threshold is None else threshold
         self.sample_rate = sample_rate
-        self.min_pops = min_pops or cfg.get("min_pops", 5)
-        self.confirmation_window = confirmation_window or cfg.get("confirmation_window", 20.0)
+        self.min_pops = cfg.get("min_pops", 5) if min_pops is None else min_pops
+        self.confirmation_window = (
+            cfg.get("confirmation_window", 20.0)
+            if confirmation_window is None
+            else confirmation_window
+        )
 
         self.window_samples = int(self.window_size * sample_rate)
         self.hop_samples = int(self.window_samples * (1 - self.overlap))
@@ -361,7 +369,8 @@ class OnnxFirstCrackDetector:
         self._first_crack_detected = False
         self._first_crack_time: float | None = None
         self._start_time: float | None = None
-        self._audio_buffer: deque = deque(maxlen=int(sample_rate * 60))
+        # Size buffer to just over one window to avoid materializing 60s of audio
+        self._audio_buffer: deque = deque(maxlen=self.window_samples + int(sample_rate * 0.5))
         self._detection_history: deque = deque(maxlen=200)
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -457,7 +466,9 @@ class OnnxFirstCrackDetector:
                         buf_size = len(self._audio_buffer)
                     if buf_size >= self.window_samples:
                         with self._lock:
-                            window = np.array(list(self._audio_buffer)[-self.window_samples :])
+                            # Slice the last window_samples from the deque
+                            buf_list = list(self._audio_buffer)
+                            window = np.array(buf_list[-self.window_samples :])
                         current_time = time.time() - (self._start_time or time.time())
                         prob = self._predict_window(window)
                         self._update_state(prob, current_time)
