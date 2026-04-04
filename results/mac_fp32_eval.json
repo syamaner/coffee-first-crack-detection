@@ -1,5 +1,5 @@
 {
-  "model": "/Users/sertanyamaner/git/coffee-first-crack-detection/exports/onnx/fp32/model.onnx",
+  "model": "model.onnx",
   "model_size_mb": 345.0,
   "n_samples": 45,
   "accuracy": 0.9333,

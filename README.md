@@ -219,7 +219,7 @@ Full dataset: 298 × 10 s chunks, 208 / 45 / 45 train / val / test split.
 - **Cooling**: active cooler mandatory — sustained inference reaches 77°C+ and triggers thermal throttling
 - **Threads**: limit ONNX Runtime to 2 threads (`--threads 2` or `sess_options.intra_op_num_threads = 2`) to balance speed vs power/thermal
 - **Latency target**: current AST model (87M params) does not meet the <500ms target on RPi5. Consider a lighter model for real-time edge use
-- Install: `pip install -r requirements-pi.txt` (also needs `torch` CPU-only for feature extraction)
+- Install: `pip install -r requirements-pi.txt` then `pip install torch --index-url https://download.pytorch.org/whl/cpu`
 
 ---
 

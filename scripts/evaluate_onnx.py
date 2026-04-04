@@ -31,22 +31,13 @@ from sklearn.metrics import (
     f1_score,
     precision_score,
     recall_score,
+    roc_auc_score,
 )
 from transformers import ASTFeatureExtractor
 
 # Canonical label mapping — must stay in sync with configs/default.yaml
 LABEL2ID: dict[str, int] = {"no_first_crack": 0, "first_crack": 1}
 ID2LABEL: dict[int, str] = {v: k for k, v in LABEL2ID.items()}
-
-# ASTFeatureExtractor parameters (same as model.py)
-FEATURE_EXTRACTOR_KWARGS: dict[str, object] = {
-    "max_length": 1024,
-    "num_mel_bins": 128,
-    "sampling_rate": 16000,
-    "do_normalize": True,
-    "mean": -4.2677393,
-    "std": 4.5689974,
-}
 
 SAMPLE_RATE = 16000
 
@@ -118,8 +109,8 @@ def evaluate(
     onnx_path = _find_onnx_model(onnx_dir)
     print(f"Model: {onnx_path} ({onnx_path.stat().st_size / 1e6:.1f} MB)")
 
-    # Load feature extractor
-    extractor = ASTFeatureExtractor(**FEATURE_EXTRACTOR_KWARGS)
+    # Load feature extractor from saved preprocessor config
+    extractor = ASTFeatureExtractor.from_pretrained(str(onnx_dir))
 
     # Create ONNX Runtime session with thread limit
     sess_options = rt.SessionOptions()
@@ -178,6 +169,7 @@ def evaluate(
     f1 = f1_score(y_true, y_pred, pos_label=1)
     precision = precision_score(y_true, y_pred, pos_label=1)
     recall = recall_score(y_true, y_pred, pos_label=1)
+    roc_auc = roc_auc_score(y_true, y_prob)
     cm = confusion_matrix(y_true, y_pred).tolist()
 
     latency_arr = np.array(latencies_ms)
@@ -199,6 +191,7 @@ def evaluate(
     print(f"  F1:          {f1:.3f}")
     print(f"  Precision:   {precision:.3f}")
     print(f"  Recall (FC): {recall:.3f}")
+    print(f"  ROC-AUC:     {roc_auc:.3f}")
     print("\nConfusion Matrix:")
     print(f"  {'':20s} predicted_NFC  predicted_FC")
     print(f"  {'actual_no_first_crack':20s}  {cm[0][0]:>8d}  {cm[0][1]:>11d}")
@@ -218,7 +211,7 @@ def evaluate(
     print(classification_report(y_true, y_pred, target_names=list(LABEL2ID.keys())))
 
     results: dict[str, object] = {
-        "model": str(onnx_path),
+        "model": onnx_path.name,
         "model_size_mb": round(onnx_path.stat().st_size / 1e6, 1),
         "threads": threads,
         "n_samples": len(samples),
@@ -226,6 +219,7 @@ def evaluate(
         "f1": round(f1, 4),
         "precision": round(precision, 4),
         "recall_first_crack": round(recall, 4),
+        "roc_auc": round(roc_auc, 4),
         "confusion_matrix": cm,
         "latency": latency_stats,
     }

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Benchmark ONNX inference latency — no PyTorch dependency.
+"""Benchmark end-to-end ONNX pipeline latency — no PyTorch dependency.
 
 Designed to run on Raspberry Pi 5 with only ``requirements-pi.txt`` installed.
-Uses dummy audio to measure pure inference throughput without I/O variance.
+Uses dummy audio to measure end-to-end preprocessing and ONNX inference latency
+without I/O variance.
 
 Usage::
 
@@ -22,16 +23,6 @@ from pathlib import Path
 
 import numpy as np
 from transformers import ASTFeatureExtractor
-
-# ASTFeatureExtractor parameters (same as model.py)
-FEATURE_EXTRACTOR_KWARGS: dict[str, object] = {
-    "max_length": 1024,
-    "num_mel_bins": 128,
-    "sampling_rate": 16000,
-    "do_normalize": True,
-    "mean": -4.2677393,
-    "std": 4.5689974,
-}
 
 SAMPLE_RATE = 16000
 WINDOW_SEC = 10.0
@@ -150,13 +141,14 @@ def main() -> None:
     print(f"  Warmup:        {args.n_warmup} runs")
     print(f"  Timed:         {args.n_runs} runs")
 
-    extractor = ASTFeatureExtractor(**FEATURE_EXTRACTOR_KWARGS)
-
     # Find all ONNX models
     onnx_files = sorted(args.onnx_dir.rglob("*.onnx"))
     if not onnx_files:
         print(f"Error: no .onnx files found under {args.onnx_dir}")
         raise SystemExit(1)
+
+    # Load feature extractor from the first ONNX model's saved preprocessor config
+    extractor = ASTFeatureExtractor.from_pretrained(str(onnx_files[0].parent))
 
     results: list[dict[str, object]] = []
     for onnx_path in onnx_files:

@@ -15,9 +15,14 @@ numpy>=1.24.0
 huggingface-hub>=0.20.0
 transformers>=4.37.0
 
+# Metrics
+scikit-learn>=1.3.0
+
 # Utilities
 pyyaml>=6.0
 tqdm>=4.66.0
 
-# Note: Do NOT install torch, torchaudio, or optimum on RPi5 unless
-# you specifically need PyTorch CPU inference (ONNX is preferred for speed).
+# Note: torch CPU-only is also required for ASTFeatureExtractor filterbank
+# computation. Install separately:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# Do NOT install torchaudio or optimum on RPi5 (ONNX Runtime is used for inference).

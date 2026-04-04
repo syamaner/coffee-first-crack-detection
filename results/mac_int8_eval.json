@@ -1,5 +1,5 @@
 {
-  "model": "/Users/sertanyamaner/git/coffee-first-crack-detection/exports/onnx/int8/model_quantized.onnx",
+  "model": "model_quantized.onnx",
   "model_size_mb": 89.9,
   "n_samples": 45,
   "accuracy": 0.9333,
