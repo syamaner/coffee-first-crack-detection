@@ -1,0 +1,14 @@
+{
+  "audio_file": "roast-3-costarica-hermosa-hp-a.wav",
+  "duration": 625.6013378684808,
+  "sample_rate": 44100,
+  "annotations": [
+    {
+      "id": "chunk_000",
+      "start_time": 439.10711881990625,
+      "end_time": 614.3985049221,
+      "label": "first_crack",
+      "confidence": "high"
+    }
+  ]
+}

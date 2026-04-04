@@ -1,0 +1,14 @@
+{
+  "audio_file": "25-10-19_1103-costarica-hermosa-5.alog.wav",
+  "duration": 631.1741269841269,
+  "sample_rate": 44100,
+  "annotations": [
+    {
+      "id": "chunk_000",
+      "start_time": 397.5114579624233,
+      "end_time": 617.9325033728666,
+      "label": "first_crack",
+      "confidence": "high"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "audio_file": "mic2-brazil-roast4-21-02-26-12-24.wav",
+  "duration": 724.4406349206349,
+  "sample_rate": 44100,
+  "annotations": [
+    {
+      "id": "chunk_000",
+      "start_time": 616.3341497235599,
+      "end_time": 705.8717562867844,
+      "label": "first_crack",
+      "confidence": "high"
+    }
+  ]
+}

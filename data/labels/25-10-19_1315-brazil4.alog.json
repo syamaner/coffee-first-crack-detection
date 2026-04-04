@@ -1,0 +1,14 @@
+{
+  "audio_file": "25-10-19_1315-brazil4.alog.wav",
+  "duration": 590.8642857142858,
+  "sample_rate": 44100,
+  "annotations": [
+    {
+      "id": "chunk_000",
+      "start_time": 436.301823334671,
+      "end_time": 580.283499699037,
+      "label": "first_crack",
+      "confidence": "high"
+    }
+  ]
+}
