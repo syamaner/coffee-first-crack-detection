@@ -486,7 +486,7 @@ def threshold_sweep(
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Evaluate ONNX model on test split (no PyTorch required)"
+        description="Evaluate ONNX model on test split (no PyTorch model inference required)"
     )
     # Model source: either local --onnx-dir or HF Hub --repo-id
     model_group = parser.add_mutually_exclusive_group(required=True)

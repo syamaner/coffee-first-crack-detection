@@ -107,6 +107,7 @@ def _resolve_onnx_model(
         FileNotFoundError: If no ONNX model is found in the given subfolder.
     """
     from huggingface_hub import hf_hub_download
+    from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
 
     for filename in ("model_quantized.onnx", "model.onnx"):
         try:
@@ -115,8 +116,14 @@ def _resolve_onnx_model(
                 filename=f"{subfolder}/{filename}",
             )
             return path
-        except Exception:  # noqa: BLE001
+        except (EntryNotFoundError, RepositoryNotFoundError):
+            # Expected when trying alternative filenames — continue to next
             continue
+        except Exception as exc:
+            # Network errors, auth issues, etc. — propagate immediately
+            raise RuntimeError(
+                f"Failed to download {filename} from {repo_id}/{subfolder}: {exc}"
+            ) from exc
 
     raise FileNotFoundError(
         f"No ONNX model found in {repo_id}/{subfolder} (tried model_quantized.onnx, model.onnx)"
@@ -465,10 +472,10 @@ class OnnxFirstCrackDetector:
                     with self._lock:
                         buf_size = len(self._audio_buffer)
                     if buf_size >= self.window_samples:
+                        # Copy only the tail under the lock, convert outside
                         with self._lock:
-                            # Slice the last window_samples from the deque
-                            buf_list = list(self._audio_buffer)
-                            window = np.array(buf_list[-self.window_samples :])
+                            tail = list(self._audio_buffer)[-self.window_samples :]
+                        window = np.array(tail)
                         current_time = time.time() - (self._start_time or time.time())
                         prob = self._predict_window(window)
                         self._update_state(prob, current_time)
