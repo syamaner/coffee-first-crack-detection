@@ -120,11 +120,30 @@ def chunk_recording(
         List of dicts, each with ``start_sec``, ``end_sec``, ``label``,
         ``overlap_sec``, and ``samples`` (numpy array).
     """
-    if hop_size is None:
-        hop_size = window_size
+    hop_size = window_size if hop_size is None else hop_size
+
+    if window_size <= 0:
+        raise ValueError(f"window_size must be > 0 seconds, got {window_size!r}")
+    if hop_size <= 0:
+        raise ValueError(f"hop_size must be > 0 seconds, got {hop_size!r}")
+    if sr <= 0:
+        raise ValueError(f"sr must be > 0, got {sr!r}")
 
     window_samples = round(window_size * sr)
     hop_samples = round(hop_size * sr)
+
+    if window_samples < 1:
+        raise ValueError(
+            "window_size is too small for the sample rate: "
+            f"round(window_size * sr) must be >= 1, got {window_samples} "
+            f"for window_size={window_size!r}, sr={sr!r}"
+        )
+    if hop_samples < 1:
+        raise ValueError(
+            "hop_size is too small for the sample rate: "
+            f"round(hop_size * sr) must be >= 1, got {hop_samples} "
+            f"for hop_size={hop_size!r}, sr={sr!r}"
+        )
     chunks: list[dict[str, Any]] = []
     sample_pos = 0
 
@@ -212,7 +231,8 @@ def process_recording(
         return {"first_crack": 0, "no_first_crack": 0}
 
     print(f"\n📁 Processing: {audio_file}")
-    audio, sr = librosa.load(str(audio_path), sr=sample_rate, mono=True)
+    audio, loaded_sr = librosa.load(str(audio_path), sr=sample_rate, mono=True)
+    sr = int(loaded_sr)
     duration = len(audio) / sr
     print(f"   Duration: {duration:.1f}s, Sample rate: {sr}Hz")
 

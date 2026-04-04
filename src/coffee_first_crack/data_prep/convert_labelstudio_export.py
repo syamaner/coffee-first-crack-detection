@@ -66,13 +66,25 @@ def convert_task(task: dict[str, Any], data_root: Path) -> dict[str, Any]:
         audio_path = task.get("data", {}).get("audio", "")
         hashed_name = Path(audio_path).name
 
+    if not hashed_name:
+        raise ValueError(
+            "Task is missing both 'file_upload' and 'data.audio', so no audio "
+            "filename could be resolved."
+        )
+
     original_name = strip_hash_prefix(hashed_name)
+    if not original_name:
+        raise ValueError(f"Resolved an empty audio filename from task source {hashed_name!r}.")
     local_audio_path = data_root / original_name
+    if not local_audio_path.exists() or not local_audio_path.is_file():
+        raise FileNotFoundError(
+            f"Resolved audio file does not exist or is not a file: {local_audio_path}"
+        )
 
     try:
         duration = librosa.get_duration(path=str(local_audio_path))
-    except Exception:
-        duration = 0.0
+    except Exception as exc:
+        raise RuntimeError(f"Failed to read duration for audio file: {local_audio_path}") from exc
 
     annotations: list[dict[str, Any]] = []
     ann_list = task.get("annotations") or []

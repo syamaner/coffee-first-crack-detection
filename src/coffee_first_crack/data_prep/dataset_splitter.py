@@ -19,6 +19,7 @@ import re
 import shutil
 from collections import defaultdict
 from pathlib import Path
+from typing import cast
 
 from sklearn.model_selection import train_test_split
 
@@ -107,12 +108,25 @@ def recording_level_split(
     ) -> tuple[list[str], list[str]]:
         """train_test_split with fallback to unstratified if too few samples."""
         try:
-            return train_test_split(
-                data, test_size=test_size, random_state=random_state, stratify=stratify_labels
+            return cast(
+                tuple[list[str], list[str]],
+                train_test_split(
+                    data, test_size=test_size, random_state=random_state, stratify=stratify_labels
+                ),
             )
         except ValueError:
             logger.warning("Too few recordings for stratified split — falling back to random.")
-            return train_test_split(data, test_size=test_size, random_state=random_state)
+            try:
+                return cast(
+                    tuple[list[str], list[str]],
+                    train_test_split(data, test_size=test_size, random_state=random_state),
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    "Unable to split recordings with the requested test_size="
+                    f"{test_size}. Got {len(data)} recording(s), which is insufficient "
+                    "for either stratified or unstratified splitting."
+                ) from exc
 
     # First split: separate test set
     train_val_recs, test_recs = _safe_split(recordings, test_ratio, seed, has_fc)

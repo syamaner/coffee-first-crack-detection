@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
+import coffee_first_crack.data_prep.convert_labelstudio_export as convert_labelstudio_export
 from coffee_first_crack.data_prep.chunk_audio import (
     chunk_recording,
     compute_overlap,
     label_window,
 )
-from coffee_first_crack.data_prep.convert_labelstudio_export import strip_hash_prefix
-from coffee_first_crack.data_prep.dataset_splitter import extract_recording_stem
+from coffee_first_crack.data_prep.convert_labelstudio_export import (
+    convert_task,
+    strip_hash_prefix,
+)
+from coffee_first_crack.data_prep.dataset_splitter import (
+    extract_recording_stem,
+    recording_level_split,
+)
 
 # ---------------------------------------------------------------------------
 # compute_overlap
@@ -173,6 +182,36 @@ class TestChunkRecording:
             "no_first_crack",
         ]
 
+    def test_zero_window_size_raises(self) -> None:
+        """Window size must be positive."""
+        audio = self._make_audio(10.0)
+        with pytest.raises(ValueError, match="window_size must be > 0 seconds"):
+            chunk_recording(audio, 16000, [], window_size=0.0)
+
+    def test_zero_hop_size_raises(self) -> None:
+        """Hop size must be positive."""
+        audio = self._make_audio(10.0)
+        with pytest.raises(ValueError, match="hop_size must be > 0 seconds"):
+            chunk_recording(audio, 16000, [], window_size=1.0, hop_size=0.0)
+
+    def test_zero_sample_rate_raises(self) -> None:
+        """Sample rate must be positive."""
+        audio = np.zeros(10, dtype=np.float32)
+        with pytest.raises(ValueError, match="sr must be > 0"):
+            chunk_recording(audio, 0, [], window_size=1.0)
+
+    def test_window_size_rounds_to_zero_samples_raises(self) -> None:
+        """Reject window sizes that round to zero samples."""
+        audio = np.zeros(1, dtype=np.float32)
+        with pytest.raises(ValueError, match="window_size is too small for the sample rate"):
+            chunk_recording(audio, 100, [], window_size=0.001, hop_size=0.01)
+
+    def test_hop_size_rounds_to_zero_samples_raises(self) -> None:
+        """Reject hop sizes that round to zero samples."""
+        audio = np.zeros(10, dtype=np.float32)
+        with pytest.raises(ValueError, match="hop_size is too small for the sample rate"):
+            chunk_recording(audio, 100, [], window_size=0.01, hop_size=0.001)
+
 
 # ---------------------------------------------------------------------------
 # extract_recording_stem
@@ -227,3 +266,106 @@ class TestStripHashPrefix:
     def test_no_hyphens(self) -> None:
         """Filename without hyphens returned as-is."""
         assert strip_hash_prefix("recording.wav") == "recording.wav"
+
+
+# ---------------------------------------------------------------------------
+# convert_task
+# ---------------------------------------------------------------------------
+
+
+class TestConvertTask:
+    """Tests for converting Label Studio tasks to per-file annotations."""
+
+    def test_successful_conversion(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A valid task resolves the audio file, duration, and labels."""
+        audio_file = tmp_path / "roast-1.wav"
+        audio_file.write_bytes(b"stub")
+        monkeypatch.setattr(convert_labelstudio_export.librosa, "get_duration", lambda path: 12.5)
+
+        task = {
+            "file_upload": "0d93a737-roast-1.wav",
+            "annotations": [
+                {
+                    "result": [
+                        {
+                            "type": "labels",
+                            "value": {
+                                "start": 1.0,
+                                "end": 2.5,
+                                "labels": ["first_crack"],
+                            },
+                        }
+                    ]
+                }
+            ],
+        }
+
+        converted = convert_task(task, tmp_path)
+
+        assert converted["audio_file"] == "roast-1.wav"
+        assert converted["duration"] == pytest.approx(12.5)
+        assert converted["sample_rate"] == 44100
+        assert converted["annotations"] == [
+            {
+                "id": "chunk_000",
+                "start_time": 1.0,
+                "end_time": 2.5,
+                "label": "first_crack",
+                "confidence": "high",
+            }
+        ]
+
+    def test_missing_audio_source_raises(self, tmp_path: Path) -> None:
+        """Tasks without file_upload or data.audio fail fast."""
+        with pytest.raises(
+            ValueError,
+            match="Task is missing both 'file_upload' and 'data.audio'",
+        ):
+            convert_task({"annotations": []}, tmp_path)
+
+    def test_missing_local_audio_file_raises(self, tmp_path: Path) -> None:
+        """Resolved audio files must exist on disk."""
+        task = {"file_upload": "0d93a737-roast-1.wav", "annotations": []}
+
+        with pytest.raises(
+            FileNotFoundError, match="Resolved audio file does not exist or is not a file"
+        ):
+            convert_task(task, tmp_path)
+
+    def test_duration_read_failure_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Duration read errors are surfaced instead of silently zeroing metadata."""
+        audio_file = tmp_path / "roast-1.wav"
+        audio_file.write_bytes(b"stub")
+
+        def _raise_duration_error(path: str) -> float:
+            raise ValueError(f"bad audio: {path}")
+
+        monkeypatch.setattr(
+            convert_labelstudio_export.librosa, "get_duration", _raise_duration_error
+        )
+
+        task = {"file_upload": "0d93a737-roast-1.wav", "annotations": []}
+
+        with pytest.raises(RuntimeError, match="Failed to read duration for audio file"):
+            convert_task(task, tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# recording_level_split
+# ---------------------------------------------------------------------------
+
+
+class TestRecordingLevelSplit:
+    """Tests for recording-level dataset splitting edge cases."""
+
+    def test_single_recording_raises_clear_error(self) -> None:
+        """A single recording cannot satisfy the configured split ratios."""
+        groups = {"rec1": {"first_crack": [Path("rec1_w0000.0.wav")]}}
+
+        with pytest.raises(
+            ValueError,
+            match="Unable to split recordings with the requested test_size=0.15",
+        ):
+            recording_level_split(groups, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, seed=42)
