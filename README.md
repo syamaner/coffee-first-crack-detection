@@ -3,6 +3,11 @@ pipeline_tag: audio-classification
 library_name: transformers
 language: en
 license: apache-2.0
+widget:
+  - src: https://huggingface.co/syamaner/coffee-first-crack-detection/resolve/main/audio_examples/first_crack_sample.wav
+    example_title: "First crack (10s clip)"
+  - src: https://huggingface.co/syamaner/coffee-first-crack-detection/resolve/main/audio_examples/no_first_crack_sample.wav
+    example_title: "No first crack (10s clip)"
 tags:
   - audio
   - coffee

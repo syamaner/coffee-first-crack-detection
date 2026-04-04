@@ -207,7 +207,11 @@ marimo/_lsp/
 __marimo__/
 
 # Project-specific ignores
-data/
+# data/raw, processed and splits contain large audio files — ignore those directories
+# data/labels and data/DATASET_CARD.md are tracked (annotations + HF dataset card)
+data/raw/
+data/processed/
+data/splits/
 experiments/
 exports/
 results/*.log
