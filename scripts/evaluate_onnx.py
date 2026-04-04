@@ -6,12 +6,28 @@ Walks ``data/splits/test/{first_crack,no_first_crack}/`` to infer ground-truth
 labels from directory names, runs each WAV through the ONNX model, and reports
 accuracy, F1, precision, recall, confusion matrix, and per-window latency.
 
+Supports loading the model from a local directory or from HuggingFace Hub.
+
 Usage::
 
+    # Local model
     python scripts/evaluate_onnx.py \
         --onnx-dir exports/onnx/int8 \
         --test-dir data/splits/test \
         --output results/pi5_int8_eval.json
+
+    # HuggingFace Hub model
+    python scripts/evaluate_onnx.py \
+        --repo-id syamaner/coffee-first-crack-detection \
+        --subfolder onnx/int8 \
+        --test-dir data/splits/test \
+        --output results/eval.json
+
+    # Threshold sweep from HF Hub
+    python scripts/evaluate_onnx.py \
+        --repo-id syamaner/coffee-first-crack-detection \
+        --subfolder onnx/int8 \
+        --threshold-sweep --output results/threshold_sweep.json
 """
 
 from __future__ import annotations
@@ -55,6 +71,77 @@ def _find_onnx_model(onnx_dir: Path) -> Path:
     return candidates[0]
 
 
+def _resolve_model(
+    onnx_dir: Path | None = None,
+    repo_id: str | None = None,
+    subfolder: str = "onnx/int8",
+) -> tuple[str, str]:
+    """Resolve ONNX model path and feature extractor source.
+
+    Supports two modes:
+    - **Local**: ``onnx_dir`` points to a directory containing ``*.onnx`` +
+      ``preprocessor_config.json``.
+    - **HuggingFace Hub**: ``repo_id`` + ``subfolder`` are used to download the
+      ONNX model via ``hf_hub_download`` and load the feature extractor via
+      ``from_pretrained(repo_id, subfolder=...)``.
+
+    Args:
+        onnx_dir: Local directory with the ONNX model.
+        repo_id: HuggingFace Hub repository ID.
+        subfolder: Subfolder within the HF repo (default: ``onnx/int8``).
+
+    Returns:
+        Tuple of ``(onnx_model_path, extractor_source)`` where
+        ``extractor_source`` is either a local path string or a tuple to pass
+        to ``from_pretrained``.
+    """
+    if onnx_dir is not None:
+        onnx_path = str(_find_onnx_model(onnx_dir))
+        extractor_source = str(onnx_dir)
+        return onnx_path, extractor_source
+
+    if repo_id is None:
+        raise ValueError("Either --onnx-dir or --repo-id must be specified")
+
+    from huggingface_hub import hf_hub_download
+
+    # Try quantized first, fall back to non-quantized
+    for filename in ("model_quantized.onnx", "model.onnx"):
+        try:
+            onnx_path = hf_hub_download(
+                repo_id=repo_id,
+                filename=f"{subfolder}/{filename}",
+            )
+            print(f"Downloaded {filename} from {repo_id}/{subfolder}")
+            break
+        except Exception:  # noqa: BLE001
+            continue
+    else:
+        raise FileNotFoundError(
+            f"No ONNX model found in {repo_id}/{subfolder} (tried model_quantized.onnx, model.onnx)"
+        )
+
+    # extractor_source is passed to from_pretrained as (repo_id, {subfolder})
+    extractor_source = f"{repo_id}:{subfolder}"
+    return onnx_path, extractor_source
+
+
+def _load_extractor(extractor_source: str) -> ASTFeatureExtractor:
+    """Load the feature extractor from a local path or HF Hub.
+
+    Args:
+        extractor_source: Either a local directory path or
+            ``"repo_id:subfolder"`` for HuggingFace Hub loading.
+
+    Returns:
+        An initialised ``ASTFeatureExtractor``.
+    """
+    if ":" in extractor_source and not Path(extractor_source).exists():
+        repo_id, subfolder = extractor_source.split(":", 1)
+        return ASTFeatureExtractor.from_pretrained(repo_id, subfolder=subfolder)
+    return ASTFeatureExtractor.from_pretrained(extractor_source)
+
+
 def _collect_test_samples(test_dir: Path) -> list[tuple[Path, int]]:
     """Walk test directory and return (wav_path, label_id) pairs."""
     samples: list[tuple[Path, int]] = []
@@ -85,18 +172,22 @@ def _default_threads() -> int:
 
 
 def evaluate(
-    onnx_dir: Path,
-    test_dir: Path,
+    onnx_dir: Path | None = None,
+    test_dir: Path = Path("data/splits/test"),
     output_path: Path | None = None,
     threads: int | None = None,
+    repo_id: str | None = None,
+    subfolder: str = "onnx/int8",
 ) -> dict[str, object]:
     """Run ONNX evaluation on the test split.
 
     Args:
-        onnx_dir: Directory containing the ONNX model and preprocessor config.
+        onnx_dir: Local directory containing the ONNX model and preprocessor config.
         test_dir: Test split directory with ``first_crack/`` and ``no_first_crack/`` subdirs.
         output_path: Optional path to write JSON results.
         threads: Number of ONNX Runtime intra-op threads (0 = auto, None = platform default).
+        repo_id: HuggingFace Hub repository ID (alternative to ``onnx_dir``).
+        subfolder: HF repo subfolder for model files (default: ``onnx/int8``).
 
     Returns:
         Dict with metrics, confusion matrix, and latency stats.
@@ -106,11 +197,11 @@ def evaluate(
     if threads is None:
         threads = _default_threads()
 
-    onnx_path = _find_onnx_model(onnx_dir)
+    onnx_path_str, extractor_source = _resolve_model(onnx_dir, repo_id, subfolder)
+    onnx_path = Path(onnx_path_str)
     print(f"Model: {onnx_path} ({onnx_path.stat().st_size / 1e6:.1f} MB)")
 
-    # Load feature extractor from saved preprocessor config
-    extractor = ASTFeatureExtractor.from_pretrained(str(onnx_dir))
+    extractor = _load_extractor(extractor_source)
 
     # Create ONNX Runtime session with thread limit
     sess_options = rt.SessionOptions()
@@ -233,16 +324,184 @@ def evaluate(
     return results
 
 
+def threshold_sweep(
+    onnx_dir: Path | None = None,
+    test_dir: Path = Path("data/splits/test"),
+    output_path: Path | None = None,
+    threads: int | None = None,
+    threshold_min: float = 0.50,
+    threshold_max: float = 0.95,
+    threshold_step: float = 0.05,
+    repo_id: str | None = None,
+    subfolder: str = "onnx/int8",
+) -> dict[str, object]:
+    """Sweep classification thresholds and report per-threshold metrics.
+
+    Runs ONNX inference once to collect per-sample probabilities, then
+    re-evaluates at each threshold without re-running the model.
+
+    Args:
+        onnx_dir: Local directory containing the ONNX model and preprocessor config.
+        test_dir: Test split directory with ``first_crack/`` and ``no_first_crack/`` subdirs.
+        output_path: Optional path to write JSON results.
+        threads: Number of ONNX Runtime intra-op threads.
+        threshold_min: Lowest threshold to evaluate (inclusive).
+        threshold_max: Highest threshold to evaluate (inclusive).
+        threshold_step: Step size between thresholds.
+        repo_id: HuggingFace Hub repository ID (alternative to ``onnx_dir``).
+        subfolder: HF repo subfolder for model files (default: ``onnx/int8``).
+
+    Returns:
+        Dict with per-threshold metrics and a recommended threshold.
+    """
+    import onnxruntime as rt
+
+    if threads is None:
+        threads = _default_threads()
+
+    onnx_path_str, extractor_source = _resolve_model(onnx_dir, repo_id, subfolder)
+    onnx_path = Path(onnx_path_str)
+    print(f"Model: {onnx_path} ({onnx_path.stat().st_size / 1e6:.1f} MB)")
+
+    extractor = _load_extractor(extractor_source)
+
+    sess_options = rt.SessionOptions()
+    if threads > 0:
+        sess_options.intra_op_num_threads = threads
+        sess_options.inter_op_num_threads = 1
+    sess = rt.InferenceSession(
+        str(onnx_path), sess_options=sess_options, providers=["CPUExecutionProvider"]
+    )
+    input_name = sess.get_inputs()[0].name
+
+    samples = _collect_test_samples(test_dir)
+    if not samples:
+        raise ValueError(f"No test samples found in {test_dir}")
+
+    # Single inference pass to collect probabilities
+    y_true: list[int] = []
+    y_prob: list[float] = []
+    print(f"\nRunning inference on {len(samples)} samples...")
+    for i, (wav_path, label_id) in enumerate(samples):
+        audio, _ = librosa.load(str(wav_path), sr=SAMPLE_RATE, mono=True)
+        inputs = extractor([audio.tolist()], sampling_rate=SAMPLE_RATE, return_tensors="np")
+        logits = sess.run(None, {input_name: inputs["input_values"]})[0]
+        exp_logits = np.exp(logits - np.max(logits, axis=-1, keepdims=True))
+        probs = exp_logits / exp_logits.sum(axis=-1, keepdims=True)
+        y_true.append(label_id)
+        y_prob.append(float(probs[0, 1]))
+        if (i + 1) % 10 == 0 or (i + 1) == len(samples):
+            print(f"  [{i + 1}/{len(samples)}]")
+
+    y_true_arr = np.array(y_true)
+    y_prob_arr = np.array(y_prob)
+
+    # Sweep thresholds
+    thresholds = np.arange(threshold_min, threshold_max + threshold_step / 2, threshold_step)
+    sweep_results: list[dict[str, object]] = []
+
+    print("\n" + "=" * 70)
+    print("THRESHOLD SWEEP RESULTS")
+    print("=" * 70)
+    print(
+        f"{'Thresh':>7s}  {'Acc':>6s}  {'Prec':>6s}  {'Recall':>6s}  "
+        f"{'F1':>6s}  {'FP':>4s}  {'FN':>4s}  {'AUC':>6s}"
+    )
+    print("-" * 70)
+
+    roc_auc = float(roc_auc_score(y_true_arr, y_prob_arr))
+
+    for thresh in thresholds:
+        y_pred = (y_prob_arr >= thresh).astype(int)
+        acc = float(accuracy_score(y_true_arr, y_pred))
+        prec = float(precision_score(y_true_arr, y_pred, pos_label=1, zero_division=0))
+        rec = float(recall_score(y_true_arr, y_pred, pos_label=1, zero_division=0))
+        f1 = float(f1_score(y_true_arr, y_pred, pos_label=1, zero_division=0))
+        cm = confusion_matrix(y_true_arr, y_pred).tolist()
+        # FP = predicted positive but actually negative (cm[0][1])
+        # FN = predicted negative but actually positive (cm[1][0])
+        fp = cm[0][1] if len(cm) > 1 and len(cm[0]) > 1 else 0
+        fn = cm[1][0] if len(cm) > 1 else 0
+
+        print(
+            f"  {thresh:5.2f}  {acc:6.3f}  {prec:6.3f}  {rec:6.3f}  "
+            f"{f1:6.3f}  {fp:4d}  {fn:4d}  {roc_auc:6.3f}"
+        )
+
+        sweep_results.append(
+            {
+                "threshold": round(float(thresh), 2),
+                "accuracy": round(acc, 4),
+                "precision": round(prec, 4),
+                "recall_first_crack": round(rec, 4),
+                "f1": round(f1, 4),
+                "false_positives": fp,
+                "false_negatives": fn,
+                "confusion_matrix": cm,
+            }
+        )
+
+    # Find best threshold: highest F1 among those with zero FPs
+    zero_fp = [r for r in sweep_results if r["false_positives"] == 0]
+    if zero_fp:
+        best = max(zero_fp, key=lambda r: r["f1"])  # type: ignore[arg-type]
+        recommendation = (
+            f"Threshold {best['threshold']} achieves F1={best['f1']} with zero false positives"
+        )
+    else:
+        # Fall back to highest F1 overall
+        best = max(sweep_results, key=lambda r: r["f1"])  # type: ignore[arg-type]
+        recommendation = (
+            f"No threshold eliminates all FPs. "
+            f"Best F1={best['f1']} at threshold={best['threshold']}"
+        )
+
+    print(f"\nRecommendation: {recommendation}")
+
+    result: dict[str, object] = {
+        "model": onnx_path.name,
+        "n_samples": len(samples),
+        "roc_auc": round(roc_auc, 4),
+        "thresholds": sweep_results,
+        "recommendation": recommendation,
+        "recommended_threshold": best["threshold"],
+        "per_sample_probabilities": [
+            {"file": samples[i][0].name, "label_id": y_true[i], "prob": round(y_prob[i], 4)}
+            for i in range(len(samples))
+        ],
+    }
+
+    if output_path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("w") as f:
+            json.dump(result, f, indent=2)
+        print(f"\nResults saved to {output_path}")
+
+    return result
+
+
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
         description="Evaluate ONNX model on test split (no PyTorch required)"
     )
-    parser.add_argument(
+    # Model source: either local --onnx-dir or HF Hub --repo-id
+    model_group = parser.add_mutually_exclusive_group(required=True)
+    model_group.add_argument(
         "--onnx-dir",
         type=Path,
-        required=True,
-        help="Directory containing the ONNX model (e.g. exports/onnx/int8)",
+        help="Local directory containing the ONNX model (e.g. exports/onnx/int8)",
+    )
+    model_group.add_argument(
+        "--repo-id",
+        type=str,
+        help="HuggingFace Hub repo ID (e.g. syamaner/coffee-first-crack-detection)",
+    )
+    parser.add_argument(
+        "--subfolder",
+        type=str,
+        default="onnx/int8",
+        help="HF repo subfolder for ONNX model (default: onnx/int8)",
     )
     parser.add_argument(
         "--test-dir",
@@ -262,21 +521,38 @@ def main() -> None:
         default=None,
         help="ONNX Runtime intra-op threads (default: 2 on ARM64, auto otherwise)",
     )
+    parser.add_argument(
+        "--threshold-sweep",
+        action="store_true",
+        help="Run threshold sensitivity sweep instead of standard evaluation",
+    )
     args = parser.parse_args()
 
-    if not args.onnx_dir.exists():
+    if args.onnx_dir and not args.onnx_dir.exists():
         print(f"Error: ONNX directory not found: {args.onnx_dir}")
         raise SystemExit(1)
     if not args.test_dir.exists():
         print(f"Error: test directory not found: {args.test_dir}")
         raise SystemExit(1)
 
-    evaluate(
-        onnx_dir=args.onnx_dir,
-        test_dir=args.test_dir,
-        output_path=args.output,
-        threads=args.threads,
-    )
+    if args.threshold_sweep:
+        threshold_sweep(
+            onnx_dir=args.onnx_dir,
+            test_dir=args.test_dir,
+            output_path=args.output,
+            threads=args.threads,
+            repo_id=args.repo_id,
+            subfolder=args.subfolder,
+        )
+    else:
+        evaluate(
+            onnx_dir=args.onnx_dir,
+            test_dir=args.test_dir,
+            output_path=args.output,
+            threads=args.threads,
+            repo_id=args.repo_id,
+            subfolder=args.subfolder,
+        )
 
 
 if __name__ == "__main__":

@@ -72,9 +72,10 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 - baseline_v1: 91.1% test acc / 0.913 F1 / 95.5% first_crack recall / 0.978 ROC-AUC
 - Trained on mic-1 only (298 chunks, 6 roasts)
 
-**ONNX Models**: exported from baseline_v1 checkpoint
-- FP32: 345MB (`exports/onnx/fp32/model.onnx`)
-- INT8: 90MB (`exports/onnx/int8/model_quantized.onnx`) — recommended for RPi5
+**ONNX Models**: exported from baseline_v1 checkpoint, **published to HuggingFace Hub** (2026-04-04)
+- FP32: 345MB → `onnx/fp32/model.onnx` on HF Hub
+- INT8: 90MB → `onnx/int8/model_quantized.onnx` on HF Hub — recommended for RPi5
+- Config JSONs (`config.json`, `preprocessor_config.json`) also uploaded for `from_pretrained()` support
 - Zero quality degradation from quantization (identical confusion matrix)
 
 **RPi5 Validation** (issue #22, branch `feature/22-rpi5-onnx-validation`):

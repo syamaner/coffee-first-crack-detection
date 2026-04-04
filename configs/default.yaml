@@ -54,6 +54,21 @@ inference:
   min_pops: 5
   confirmation_window: 20.0  # seconds
 
+# Raspberry Pi 5 inference profile — optimised for ~2s/window ONNX latency.
+# Use via inference_onnx.py --profile pi_inference
+pi_inference:
+  window_size: 10.0      # seconds (matches training window)
+  overlap: 0.5           # 50% → 5s hop — gives 2.9s thermal headroom per cycle
+  threshold: 0.75        # higher than Mac (0.6) to reduce false positives
+  min_pops: 3            # fewer windows per confirmation window at lower overlap
+  confirmation_window: 30.0  # seconds — wider window to compensate for fewer windows/sec
+  onnx_threads: 4        # requires adequate PSU + active cooling
+  # Rationale:
+  #   5s hop → inference uses 41% of cycle (2.07s/5s), leaving 59% idle
+  #   ~6 windows in 30s window → need 3/6 positive (50%) for confirmation
+  #   Worst-case detection delay: ~15s (3rd positive × 5s hop)
+  #   First crack phase lasts 2-3 minutes so 15s delay is acceptable
+
 export:
   output_dir: "exports/onnx"
   quantize_int8: true

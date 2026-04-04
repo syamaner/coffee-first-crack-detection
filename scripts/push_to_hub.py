@@ -66,9 +66,8 @@ def _validate_model_card(model_dir: Path) -> None:
 
 def push_model(model_dir: Path, repo_id: str) -> None:
     """Push model and feature extractor to HuggingFace Hub."""
-    from transformers import ASTForAudioClassification, ASTFeatureExtractor
-
     from huggingface_hub import HfApi
+    from transformers import ASTFeatureExtractor, ASTForAudioClassification
 
     _validate_model_card(model_dir)
     print(f"Loading model from {model_dir}...")
@@ -102,6 +101,7 @@ def push_dataset(
 ) -> None:
     """Push audio dataset with metadata to HuggingFace Datasets Hub."""
     import csv
+
     from datasets import Audio, Dataset, DatasetDict
 
     splits: dict[str, list] = {"train": [], "val": [], "test": []}
@@ -128,19 +128,23 @@ def push_dataset(
                 # Chunk names like: roast-1-costarica_chunk_001.wav
                 orig_stem = wav.stem.rsplit("_chunk_", 1)[0] if "_chunk_" in wav.stem else wav.stem
                 meta = meta_by_stem.get(orig_stem, {})
-                splits[split_name].append({
-                    "audio": str(wav),
-                    "label": label,
-                    "label_id": 1 if label == "first_crack" else 0,
-                    "microphone": meta.get("microphone", "unknown"),
-                    "coffee_origin": meta.get("coffee_origin", "unknown"),
-                })
+                splits[split_name].append(
+                    {
+                        "audio": str(wav),
+                        "label": label,
+                        "label_id": 1 if label == "first_crack" else 0,
+                        "microphone": meta.get("microphone", "unknown"),
+                        "coffee_origin": meta.get("coffee_origin", "unknown"),
+                    }
+                )
 
-    dataset_dict = DatasetDict({
-        split: Dataset.from_list(rows).cast_column("audio", Audio(sampling_rate=16000))
-        for split, rows in splits.items()
-        if rows
-    })
+    dataset_dict = DatasetDict(
+        {
+            split: Dataset.from_list(rows).cast_column("audio", Audio(sampling_rate=16000))
+            for split, rows in splits.items()
+            if rows
+        }
+    )
 
     print(f"Pushing dataset to {dataset_repo_id}...")
     dataset_dict.push_to_hub(dataset_repo_id)
@@ -148,23 +152,29 @@ def push_dataset(
 
 
 def push_onnx(onnx_dir: Path, repo_id: str) -> None:
-    """Upload ONNX files as model card attachments."""
+    """Upload ONNX models and companion config files to HuggingFace Hub.
+
+    Uploads ``*.onnx`` and ``*.json`` files (e.g. ``config.json``,
+    ``preprocessor_config.json``) from each variant subdirectory so consumers
+    can load the feature extractor via
+    ``ASTFeatureExtractor.from_pretrained(repo_id, subfolder="onnx/int8")``.
+    """
     from huggingface_hub import HfApi
 
     api = HfApi()
-    onnx_files = list(onnx_dir.rglob("*.onnx"))
-    if not onnx_files:
-        print(f"No .onnx files found in {onnx_dir}")
+    upload_files = list(onnx_dir.rglob("*.onnx")) + list(onnx_dir.rglob("*.json"))
+    if not upload_files:
+        print(f"No .onnx or .json files found in {onnx_dir}")
         return
 
-    for onnx_file in onnx_files:
+    for local_file in sorted(upload_files):
         # Preserve relative subdirectory structure (e.g., onnx/fp32/model.onnx)
         # to avoid name collisions when multiple variants exist
-        rel = onnx_file.relative_to(onnx_dir)
+        rel = local_file.relative_to(onnx_dir)
         path_in_repo = f"onnx/{rel.as_posix()}"  # as_posix() avoids Windows backslashes
         print(f"Uploading {rel} → {repo_id}/{path_in_repo}")
         api.upload_file(
-            path_or_fileobj=str(onnx_file),
+            path_or_fileobj=str(local_file),
             path_in_repo=path_in_repo,
             repo_id=repo_id,
             repo_type="model",
