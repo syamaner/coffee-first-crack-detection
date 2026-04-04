@@ -22,17 +22,17 @@ audio:
 
 training:
   batch_size: 8
-  learning_rate: 5.0e-5
+  learning_rate: 2.0e-5
   num_epochs: 20
   warmup_steps: 100
-  weight_decay: 0.01
+  weight_decay: 0.05
   max_grad_norm: 1.0
   seed: 42
   # Cropping mode: random (train) / center (eval)
   train_crop_mode: random
   eval_crop_mode: center
   use_class_weights: true
-  early_stopping_patience: 5
+  early_stopping_patience: 3
   # HuggingFace Trainer settings
   evaluation_strategy: epoch
   save_strategy: epoch
