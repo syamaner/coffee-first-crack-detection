@@ -67,6 +67,13 @@ def _simulate_sequence(
     positive windows within a trailing ``confirmation_window`` and trigger
     when ``min_pops`` is reached.
 
+    **Important**: the input samples come from ``evaluate_onnx.py --threshold-sweep``
+    which produces independent WAV chunks in label-grouped order (all ``no_first_crack``
+    then all ``first_crack``), **not** a chronological roast recording.  Therefore
+    ``detection_triggered`` and ``detection_delay_sec`` reflect per-threshold/window
+    parameter sensitivity rather than realistic roast-timeline behaviour.  For
+    real roast simulation, provide samples ordered by recording timestamp.
+
     Args:
         samples: List of dicts with ``label_id`` (0/1) and ``prob`` (float).
         threshold: Classification threshold.

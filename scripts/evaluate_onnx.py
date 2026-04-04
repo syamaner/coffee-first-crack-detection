@@ -78,7 +78,7 @@ def _resolve_model(
     onnx_dir: Path | None = None,
     repo_id: str | None = None,
     subfolder: str = "onnx/int8",
-) -> tuple[str, str]:
+) -> tuple[str, str, bool]:
     """Resolve ONNX model path and feature extractor source.
 
     Supports two modes:
@@ -94,14 +94,14 @@ def _resolve_model(
         subfolder: Subfolder within the HF repo (default: ``onnx/int8``).
 
     Returns:
-        Tuple of ``(onnx_model_path, extractor_source)`` where
-        ``extractor_source`` is either a local path string or a tuple to pass
-        to ``from_pretrained``.
+        Tuple of ``(onnx_model_path, extractor_source, is_hub)`` where
+        ``extractor_source`` is either a local path string or a
+        ``"repo_id:subfolder"`` string, and ``is_hub`` indicates which.
     """
     if onnx_dir is not None:
         onnx_path = str(_find_onnx_model(onnx_dir))
         extractor_source = str(onnx_dir)
-        return onnx_path, extractor_source
+        return onnx_path, extractor_source, False
 
     if repo_id is None:
         raise ValueError("Either --onnx-dir or --repo-id must be specified")
@@ -133,22 +133,22 @@ def _resolve_model(
             f"No ONNX model found in {repo_id}/{subfolder} (tried model_quantized.onnx, model.onnx)"
         )
 
-    # extractor_source is passed to from_pretrained as (repo_id, {subfolder})
     extractor_source = f"{repo_id}:{subfolder}"
-    return onnx_path, extractor_source
+    return onnx_path, extractor_source, True
 
 
-def _load_extractor(extractor_source: str) -> ASTFeatureExtractor:
+def _load_extractor(extractor_source: str, *, is_hub: bool = False) -> ASTFeatureExtractor:
     """Load the feature extractor from a local path or HF Hub.
 
     Args:
         extractor_source: Either a local directory path or
             ``"repo_id:subfolder"`` for HuggingFace Hub loading.
+        is_hub: If True, parse ``extractor_source`` as ``"repo_id:subfolder"``.
 
     Returns:
         An initialised ``ASTFeatureExtractor``.
     """
-    if ":" in extractor_source and not Path(extractor_source).exists():
+    if is_hub:
         repo_id, subfolder = extractor_source.split(":", 1)
         return ASTFeatureExtractor.from_pretrained(repo_id, subfolder=subfolder)
     return ASTFeatureExtractor.from_pretrained(extractor_source)
@@ -209,11 +209,11 @@ def evaluate(
     if threads is None:
         threads = _default_threads()
 
-    onnx_path_str, extractor_source = _resolve_model(onnx_dir, repo_id, subfolder)
+    onnx_path_str, extractor_source, is_hub = _resolve_model(onnx_dir, repo_id, subfolder)
     onnx_path = Path(onnx_path_str)
     print(f"Model: {onnx_path} ({onnx_path.stat().st_size / 1e6:.1f} MB)")
 
-    extractor = _load_extractor(extractor_source)
+    extractor = _load_extractor(extractor_source, is_hub=is_hub)
 
     # Create ONNX Runtime session with thread limit
     sess_options = rt.SessionOptions()
@@ -371,11 +371,11 @@ def threshold_sweep(
     if threads is None:
         threads = _default_threads()
 
-    onnx_path_str, extractor_source = _resolve_model(onnx_dir, repo_id, subfolder)
+    onnx_path_str, extractor_source, is_hub = _resolve_model(onnx_dir, repo_id, subfolder)
     onnx_path = Path(onnx_path_str)
     print(f"Model: {onnx_path} ({onnx_path.stat().st_size / 1e6:.1f} MB)")
 
-    extractor = _load_extractor(extractor_source)
+    extractor = _load_extractor(extractor_source, is_hub=is_hub)
 
     sess_options = rt.SessionOptions()
     if threads > 0:
