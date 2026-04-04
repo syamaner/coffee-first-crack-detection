@@ -54,6 +54,31 @@ The bottleneck is the ONNX model forward pass (AST, 87M params). Feature extract
 - Without fan: 77°C under 2-thread load, thermal throttling (`throttled=0xe0000`)
 - With fan: 45°C under 4-thread load, no throttling
 
+## Threshold Sweep (INT8, RPi5)
+
+Sweep run on Pi loading model from HF Hub (`syamaner/coffee-first-crack-detection`, `onnx/int8`).
+ROC-AUC = 0.988 across all thresholds.
+
+| Threshold | Accuracy | Precision | Recall | F1 | FP | FN |
+|-----------|----------|-----------|--------|-------|----|----|  
+| 0.50–0.65 | 93.3% | 0.913 | 0.955 | 0.933 | 2 | 1 |
+| 0.70–0.75 | 91.1% | 0.909 | 0.909 | 0.909 | 2 | 2 |
+| 0.80–0.90 | 93.3% | 0.952 | 0.909 | 0.930 | 1 | 2 |
+| 0.95 | 88.9% | 1.000 | 0.773 | 0.872 | 0 | 5 |
+
+**Chosen Pi threshold: 0.75** — best balance of FP reduction (1 FP) and recall.
+
+## Final HF Hub Evaluations (INT8, RPi5)
+
+Models loaded from HuggingFace Hub (not local) — confirms end-to-end deployment path.
+
+| Config | Threads | p50 (ms) | p95 (ms) | mean (ms) | Accuracy | F1 | Notes |
+|--------|---------|----------|----------|-----------|----------|----|-------|
+| 4 threads (fan) | 4 | 2,068 | 2,084 | 2,070 | 93.3% | 0.933 | ⭐ recommended |
+| 2 threads (no fan) | 2 | 2,452 | 2,470 | 2,453 | 93.3% | 0.933 | minimal hardware |
+
+Latency is consistent with earlier local-model runs — HF Hub caching works as expected.
+
 ## Result Files
 
 | File | Description |
@@ -64,3 +89,8 @@ The bottleneck is the ONNX model forward pass (AST, 87M params). Feature extract
 | `pi5_int8_2threads_eval.json` | RPi5 INT8, 2 threads, no fan |
 | `pi5_int8_eval.json` | RPi5 INT8, 1 thread |
 | `pi5_fp32_eval.json` | RPi5 FP32, 1 thread |
+| `pi5_int8_4t_optimised.json` | RPi5 INT8, 4 threads, HF Hub model ⭐ |
+| `pi5_int8_2t_optimised.json` | RPi5 INT8, 2 threads, HF Hub model |
+| `pi5_threshold_sweep.json` | RPi5 threshold sweep (0.50–0.95) |
+| `threshold_sweep.json` | Mac threshold sweep (0.50–0.95) |
+| `simulation.json` | Parameter space simulation (135 combinations) |
