@@ -23,7 +23,7 @@ from typing import Any
 
 import librosa
 import numpy as np
-import soundfile as sf  # noqa: I001
+import soundfile as sf
 
 # ---------------------------------------------------------------------------
 # Core logic
@@ -46,17 +46,29 @@ def compute_overlap(
         label: The label to match (default: ``"first_crack"``).
 
     Returns:
-        Total overlap in seconds (clamped to the window duration).
+        Union overlap in seconds (cannot exceed window duration).
     """
-    total = 0.0
+    # Collect intervals clipped to the window, then merge to compute union.
+    intervals: list[tuple[float, float]] = []
     for r in regions:
         if r["label"] != label:
             continue
-        overlap_start = max(window_start, r["start_time"])
-        overlap_end = min(window_end, r["end_time"])
-        if overlap_end > overlap_start:
-            total += overlap_end - overlap_start
-    return min(total, window_end - window_start)
+        seg_start = max(window_start, r["start_time"])
+        seg_end = min(window_end, r["end_time"])
+        if seg_end > seg_start:
+            intervals.append((seg_start, seg_end))
+    if not intervals:
+        return 0.0
+    # Merge overlapping intervals
+    intervals.sort()
+    merged: list[tuple[float, float]] = [intervals[0]]
+    for start, end in intervals[1:]:
+        prev_start, prev_end = merged[-1]
+        if start <= prev_end:
+            merged[-1] = (prev_start, max(prev_end, end))
+        else:
+            merged.append((start, end))
+    return sum(end - start for start, end in merged)
 
 
 def label_window(
@@ -111,29 +123,28 @@ def chunk_recording(
     if hop_size is None:
         hop_size = window_size
 
-    duration = len(audio) / sr
+    window_samples = round(window_size * sr)
+    hop_samples = round(hop_size * sr)
     chunks: list[dict[str, Any]] = []
-    pos = 0.0
+    sample_pos = 0
 
-    while pos + window_size <= duration:
-        window_end = pos + window_size
-        lbl = label_window(pos, window_end, regions, overlap_threshold)
-        overlap = compute_overlap(pos, window_end, regions)
-
-        start_sample = int(pos * sr)
-        end_sample = int(window_end * sr)
-        samples = audio[start_sample:end_sample]
+    while sample_pos + window_samples <= len(audio):
+        pos_sec = sample_pos / sr
+        end_sec = (sample_pos + window_samples) / sr
+        lbl = label_window(pos_sec, end_sec, regions, overlap_threshold)
+        overlap = compute_overlap(pos_sec, end_sec, regions)
+        samples = audio[sample_pos : sample_pos + window_samples]
 
         chunks.append(
             {
-                "start_sec": pos,
-                "end_sec": window_end,
+                "start_sec": pos_sec,
+                "end_sec": end_sec,
                 "label": lbl,
                 "overlap_sec": overlap,
                 "samples": samples,
             }
         )
-        pos += hop_size
+        sample_pos += hop_samples
 
     return chunks
 

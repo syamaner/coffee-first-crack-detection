@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -22,18 +23,28 @@ import librosa
 
 SAMPLE_RATE = 44100
 
+# Label Studio prefixes uploads with an 8-char hex hash or a UUID-like string.
+_LABEL_STUDIO_HASH_RE = re.compile(
+    r"^(?:[0-9a-f]{8}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})-(.+)$",
+    re.IGNORECASE,
+)
+
 
 def strip_hash_prefix(filename: str) -> str:
     """Remove the hash prefix Label Studio adds to uploaded filenames.
+
+    Only strips prefixes that match known Label Studio hash formats.
+    Filenames that merely contain hyphens are returned unchanged.
 
     Args:
         filename: Potentially prefixed filename, e.g. ``"0d93a737-roast-1.wav"``.
 
     Returns:
-        Original filename without the hash prefix.
+        Original filename without a recognised Label Studio hash prefix.
     """
-    if "-" in filename:
-        return filename.split("-", 1)[1]
+    match = _LABEL_STUDIO_HASH_RE.match(filename)
+    if match:
+        return match.group(1)
     return filename
 
 

@@ -14,12 +14,15 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import logging
 import re
 import shutil
 from collections import defaultdict
 from pathlib import Path
 
 from sklearn.model_selection import train_test_split
+
+logger = logging.getLogger(__name__)
 
 
 def extract_recording_stem(chunk_filename: str) -> str:
@@ -96,25 +99,30 @@ def recording_level_split(
         1 if "first_crack" in groups[r] and groups[r]["first_crack"] else 0 for r in recordings
     ]
 
+    def _safe_split(
+        data: list[str],
+        test_size: float,
+        random_state: int,
+        stratify_labels: list[int],
+    ) -> tuple[list[str], list[str]]:
+        """train_test_split with fallback to unstratified if too few samples."""
+        try:
+            return train_test_split(
+                data, test_size=test_size, random_state=random_state, stratify=stratify_labels
+            )
+        except ValueError:
+            logger.warning("Too few recordings for stratified split — falling back to random.")
+            return train_test_split(data, test_size=test_size, random_state=random_state)
+
     # First split: separate test set
-    train_val_recs, test_recs = train_test_split(
-        recordings,
-        test_size=test_ratio,
-        random_state=seed,
-        stratify=has_fc,
-    )
+    train_val_recs, test_recs = _safe_split(recordings, test_ratio, seed, has_fc)
 
     # Second split: train vs val
     train_val_fc = [
         1 if "first_crack" in groups[r] and groups[r]["first_crack"] else 0 for r in train_val_recs
     ]
     val_ratio_adjusted = val_ratio / (train_ratio + val_ratio)
-    train_recs, val_recs = train_test_split(
-        train_val_recs,
-        test_size=val_ratio_adjusted,
-        random_state=seed,
-        stratify=train_val_fc,
-    )
+    train_recs, val_recs = _safe_split(train_val_recs, val_ratio_adjusted, seed, train_val_fc)
 
     return train_recs, val_recs, test_recs
 
@@ -138,6 +146,10 @@ def copy_chunks(
     """
     counts: dict[str, int] = defaultdict(int)
     split_dir = output_dir / split_name
+
+    # Clean stale data from previous runs
+    if split_dir.exists():
+        shutil.rmtree(split_dir)
 
     for rec_stem in recording_stems:
         for label, files in groups[rec_stem].items():

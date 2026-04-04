@@ -10,6 +10,7 @@ from coffee_first_crack.data_prep.chunk_audio import (
     compute_overlap,
     label_window,
 )
+from coffee_first_crack.data_prep.convert_labelstudio_export import strip_hash_prefix
 from coffee_first_crack.data_prep.dataset_splitter import extract_recording_stem
 
 # ---------------------------------------------------------------------------
@@ -58,15 +59,23 @@ class TestComputeOverlap:
         """No regions at all."""
         assert compute_overlap(0.0, 10.0, []) == pytest.approx(0.0)
 
-    def test_overlap_clamped_to_window(self) -> None:
-        """Overlap cannot exceed window duration even with overlapping regions."""
-        # Two overlapping regions that together exceed the window
+    def test_overlapping_regions_union(self) -> None:
+        """Overlapping regions compute union, not sum."""
         regions = [
             {"start_time": 0.0, "end_time": 10.0, "label": "first_crack"},
             {"start_time": 5.0, "end_time": 15.0, "label": "first_crack"},
         ]
-        # Without clamping: 10 + 5 = 15, but window is only 10s
+        # Union is 0-15, clipped to window 0-10 = 10s
         assert compute_overlap(0.0, 10.0, regions) == pytest.approx(10.0)
+
+    def test_overlapping_regions_partial(self) -> None:
+        """Partially overlapping regions in the middle of a window."""
+        regions = [
+            {"start_time": 2.0, "end_time": 6.0, "label": "first_crack"},
+            {"start_time": 4.0, "end_time": 8.0, "label": "first_crack"},
+        ]
+        # Union is 2-8 = 6s within a 0-10 window
+        assert compute_overlap(0.0, 10.0, regions) == pytest.approx(6.0)
 
 
 # ---------------------------------------------------------------------------
@@ -191,3 +200,30 @@ class TestExtractRecordingStem:
     def test_no_window_suffix(self) -> None:
         """Filenames without the _w suffix return the full stem."""
         assert extract_recording_stem("some-file.wav") == "some-file"
+
+
+# ---------------------------------------------------------------------------
+# strip_hash_prefix
+# ---------------------------------------------------------------------------
+
+
+class TestStripHashPrefix:
+    """Tests for Label Studio hash prefix stripping."""
+
+    def test_hex_hash_prefix(self) -> None:
+        """8-char hex hash is stripped."""
+        assert strip_hash_prefix("0d93a737-roast-1.wav") == "roast-1.wav"
+
+    def test_normal_filename_preserved(self) -> None:
+        """Normal hyphenated filenames are NOT stripped."""
+        assert strip_hash_prefix("roast-1-costarica-hermosa-hp-a.wav") == (
+            "roast-1-costarica-hermosa-hp-a.wav"
+        )
+
+    def test_mic2_filename_preserved(self) -> None:
+        """mic2 filenames are NOT stripped."""
+        assert strip_hash_prefix("mic2-brazil-roast1.wav") == "mic2-brazil-roast1.wav"
+
+    def test_no_hyphens(self) -> None:
+        """Filename without hyphens returned as-is."""
+        assert strip_hash_prefix("recording.wav") == "recording.wav"
