@@ -1,7 +1,7 @@
 # Epic: Coffee First Crack Detection — HuggingFace Model Repository
 
 **GitHub Issue**: [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1)
-**Status**: ✅ Complete — all 14 stories done
+**Status**: ✅ Repository complete — pending dataset annotation & retraining
 **Last Updated**: 2026-04-04
 
 ## Objective
@@ -50,17 +50,49 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 
 ## Active Context
 
-**All stories complete.** 14/14 ✅
+**All 14 stories complete.** Repository, model card, and quickstart notebook shipped.
 
-**PRs merged**:
-- PR #16: train.py, evaluate.py, inference.py
-- PR #17: export_onnx.py, benchmark_platforms.py, push_to_hub.py, tests
-- PR #18: input_values key fix, accelerate dep, build backend fix, training validated
-- PR #19: docs state update — 13/14 complete
-- S13 delivered via quickstart notebook update: notebooks/quickstart.ipynb
+**Model on HuggingFace**: https://huggingface.co/syamaner/coffee-first-crack-detection
+- baseline_v1: 91.1% test acc / 0.913 F1 / 95.5% first_crack recall / 0.978 ROC-AUC
+- Trained on mic-1 only (298 chunks, 6 roasts)
 
-**Blockers**:
-- 5 new mic-2 WAV recordings in `data/raw/` need Label Studio annotation before final dataset can be published to HuggingFace. This does not block the notebook.
+**Dataset**: NOT yet published — pending annotation of mic-2 recordings.
+
+---
+
+## Pending Work
+
+### 1. Annotate mic-2 recordings in Label Studio
+- 4 WAV files in `data/raw/`: `mic2-brazil-roast{1..4}-*.wav`
+- Follow `docs/data_preparation.md` Label Studio steps
+- Export JSON → run `convert_labelstudio_export.py`
+
+### 2. Expand dataset and re-split
+```bash
+python -m coffee_first_crack.data_prep.chunk_audio \
+  --labels-dir data/labels --audio-dir data/raw --output-dir data/processed
+
+python -m coffee_first_crack.data_prep.dataset_splitter \
+  --input data/processed --output data/splits --train 0.7 --val 0.15 --test 0.15 --seed 42
+```
+
+### 3. Retrain on expanded dataset (mic-1 + mic-2)
+```bash
+python -m coffee_first_crack.train \
+  --data-dir data/splits --experiment-name baseline_v2 --push-to-hub
+```
+
+### 4. Push updated dataset to HuggingFace
+```bash
+python scripts/push_to_hub.py \
+  --dataset-dir data/splits \
+  --recordings-csv data/recordings.csv \
+  --dataset-repo-id syamaner/coffee-first-crack-audio
+```
+
+### 5. Update README.md with v2 results
+- Replace baseline_v1 metrics with retrained results
+- Update `model-index` YAML values
 
 ---
 
