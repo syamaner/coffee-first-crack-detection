@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import gradio as gr
 from huggingface_hub import hf_hub_download
-from transformers import pipeline
+from transformers import pipeline as hf_pipeline
 
 _REPO_ID = "syamaner/coffee-first-crack-detection"
 
@@ -19,8 +19,17 @@ _EXAMPLES: dict[str, str] = {
     "No first crack (10s)": "audio_examples/no_first_crack_sample.wav",
 }
 
-# Load model pipeline once at startup
-_pipe = pipeline("audio-classification", model=_REPO_ID)
+# Lazy-initialised pipeline — loaded on first inference request and cached.
+# Avoids crashing the Space at startup if the Hub is temporarily unavailable.
+_pipe: object = None
+
+
+def _get_pipe() -> object:
+    """Return the cached pipeline, initialising it on first call."""
+    global _pipe  # noqa: PLW0603
+    if _pipe is None:
+        _pipe = hf_pipeline("audio-classification", model=_REPO_ID)
+    return _pipe
 
 _DESCRIPTION = """\
 Upload a **10-second** coffee roasting audio clip to check for **first crack** \
@@ -29,9 +38,10 @@ Upload a **10-second** coffee roasting audio clip to check for **first crack** \
 The model is an Audio Spectrogram Transformer (AST) fine-tuned on 973 labelled \
 10-second chunks from 15 roast recordings (97.4% test accuracy, 100% precision).
 
-> **Note**: designed for 10-second windows. Longer clips are trimmed to their \
-first 10 seconds. For full-recording sliding-window detection see the \
-[source repo](https://github.com/syamaner/coffee-first-crack-detection).
+> **Note**: designed for 10-second windows. The feature extractor internally\
+ truncates longer clips at the spectrogram level — for best results upload a\
+ clip that is approximately 10 seconds. For full-recording sliding-window\
+ detection see the [source repo](https://github.com/syamaner/coffee-first-crack-detection).
 
 Model: [syamaner/coffee-first-crack-detection](https://huggingface.co/syamaner/coffee-first-crack-detection)
 """
@@ -63,8 +73,12 @@ def classify(audio_path: str | None) -> dict[str, float]:
     """
     if audio_path is None:
         return {}
-    results: list[dict[str, float | str]] = _pipe(audio_path)  # type: ignore[assignment]
-    return {str(r["label"]): round(float(r["score"]), 4) for r in results}
+    try:
+        pipe = _get_pipe()
+        results: list[dict[str, float | str]] = pipe(audio_path)  # type: ignore[assignment]
+        return {str(r["label"]): round(float(r["score"]), 4) for r in results}
+    except Exception as exc:  # noqa: BLE001
+        raise gr.Error(f"Classification failed: {exc}") from exc
 
 
 with gr.Blocks(title="☕ Coffee First Crack Detection") as demo:
