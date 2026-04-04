@@ -37,11 +37,19 @@ SAMPLE_RATE = 16000
 WINDOW_SEC = 10.0
 
 
+def _default_threads() -> int:
+    """Return a safe default thread count for the current platform."""
+    if platform.machine() in ("aarch64", "arm64"):
+        return 2
+    return 0
+
+
 def benchmark_model(
     onnx_path: Path,
     extractor: ASTFeatureExtractor,
     n_warmup: int = 5,
     n_runs: int = 30,
+    threads: int = 0,
 ) -> dict[str, object]:
     """Benchmark a single ONNX model.
 
@@ -50,6 +58,7 @@ def benchmark_model(
         extractor: Pre-built ``ASTFeatureExtractor``.
         n_warmup: Number of warmup runs (not counted).
         n_runs: Number of timed runs.
+        threads: ONNX Runtime intra-op threads (0 = auto).
 
     Returns:
         Dict with backend name, latency stats, and model size.
@@ -57,7 +66,13 @@ def benchmark_model(
     import onnxruntime as rt
 
     print(f"\n[{onnx_path.parent.name}/{onnx_path.name}]")
-    sess = rt.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    sess_options = rt.SessionOptions()
+    if threads > 0:
+        sess_options.intra_op_num_threads = threads
+        sess_options.inter_op_num_threads = 1
+    sess = rt.InferenceSession(
+        str(onnx_path), sess_options=sess_options, providers=["CPUExecutionProvider"]
+    )
     input_name = sess.get_inputs()[0].name
 
     # Dummy 10s audio window
@@ -81,6 +96,7 @@ def benchmark_model(
         "backend": f"onnxruntime/cpu/{onnx_path.parent.name}",
         "model_file": onnx_path.name,
         "model_size_mb": round(onnx_path.stat().st_size / 1e6, 1),
+        "threads": threads if threads > 0 else "auto",
         "p50_ms": round(float(np.percentile(lat, 50)), 1),
         "p95_ms": round(float(np.percentile(lat, 95)), 1),
         "mean_ms": round(float(np.mean(lat)), 1),
@@ -110,9 +126,17 @@ def main() -> None:
     parser.add_argument("--n-warmup", type=int, default=5, help="Warmup runs (default: 5)")
     parser.add_argument("--n-runs", type=int, default=30, help="Timed runs (default: 30)")
     parser.add_argument("--output", type=Path, default=None, help="Path for JSON results")
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=None,
+        help="ONNX Runtime intra-op threads (default: 2 on ARM64, auto otherwise)",
+    )
     args = parser.parse_args()
 
     import onnxruntime as rt
+
+    threads = args.threads if args.threads is not None else _default_threads()
 
     # System info
     print("=" * 60)
@@ -121,6 +145,7 @@ def main() -> None:
     print(f"  Platform:      {platform.machine()} / {platform.system()}")
     print(f"  Python:        {platform.python_version()}")
     print(f"  ONNX Runtime:  {rt.__version__}")
+    print(f"  Threads:       {threads if threads > 0 else 'auto'}")
     print(f"  Window:        {WINDOW_SEC}s @ {SAMPLE_RATE}Hz")
     print(f"  Warmup:        {args.n_warmup} runs")
     print(f"  Timed:         {args.n_runs} runs")
@@ -135,7 +160,7 @@ def main() -> None:
 
     results: list[dict[str, object]] = []
     for onnx_path in onnx_files:
-        stats = benchmark_model(onnx_path, extractor, args.n_warmup, args.n_runs)
+        stats = benchmark_model(onnx_path, extractor, args.n_warmup, args.n_runs, threads)
         results.append(stats)
 
     # Summary

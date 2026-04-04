@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import platform
 import time
 from pathlib import Path
 
@@ -81,10 +82,22 @@ def _collect_test_samples(test_dir: Path) -> list[tuple[Path, int]]:
     return samples
 
 
+def _default_threads() -> int:
+    """Return a safe default thread count for the current platform.
+
+    ARM64 devices (e.g. Raspberry Pi 5) default to 2 threads to reduce peak
+    power draw and avoid under-voltage crashes with standard 5V/3A supplies.
+    """
+    if platform.machine() in ("aarch64", "arm64"):
+        return 2
+    return 0  # 0 = let ONNX Runtime decide
+
+
 def evaluate(
     onnx_dir: Path,
     test_dir: Path,
     output_path: Path | None = None,
+    threads: int | None = None,
 ) -> dict[str, object]:
     """Run ONNX evaluation on the test split.
 
@@ -92,11 +105,15 @@ def evaluate(
         onnx_dir: Directory containing the ONNX model and preprocessor config.
         test_dir: Test split directory with ``first_crack/`` and ``no_first_crack/`` subdirs.
         output_path: Optional path to write JSON results.
+        threads: Number of ONNX Runtime intra-op threads (0 = auto, None = platform default).
 
     Returns:
         Dict with metrics, confusion matrix, and latency stats.
     """
     import onnxruntime as rt
+
+    if threads is None:
+        threads = _default_threads()
 
     onnx_path = _find_onnx_model(onnx_dir)
     print(f"Model: {onnx_path} ({onnx_path.stat().st_size / 1e6:.1f} MB)")
@@ -104,10 +121,17 @@ def evaluate(
     # Load feature extractor
     extractor = ASTFeatureExtractor(**FEATURE_EXTRACTOR_KWARGS)
 
-    # Create ONNX Runtime session
-    sess = rt.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    # Create ONNX Runtime session with thread limit
+    sess_options = rt.SessionOptions()
+    if threads > 0:
+        sess_options.intra_op_num_threads = threads
+        sess_options.inter_op_num_threads = 1
+    sess = rt.InferenceSession(
+        str(onnx_path), sess_options=sess_options, providers=["CPUExecutionProvider"]
+    )
     input_name = sess.get_inputs()[0].name
-    print(f"ONNX Runtime: {rt.__version__}, provider: CPUExecutionProvider")
+    thread_info = f"{threads} threads" if threads > 0 else "auto threads"
+    print(f"ONNX Runtime: {rt.__version__}, provider: CPUExecutionProvider, {thread_info}")
 
     # Collect test samples
     samples = _collect_test_samples(test_dir)
@@ -196,6 +220,7 @@ def evaluate(
     results: dict[str, object] = {
         "model": str(onnx_path),
         "model_size_mb": round(onnx_path.stat().st_size / 1e6, 1),
+        "threads": threads,
         "n_samples": len(samples),
         "accuracy": round(acc, 4),
         "f1": round(f1, 4),
@@ -237,6 +262,12 @@ def main() -> None:
         default=None,
         help="Path to write JSON results (optional)",
     )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=None,
+        help="ONNX Runtime intra-op threads (default: 2 on ARM64, auto otherwise)",
+    )
     args = parser.parse_args()
 
     if not args.onnx_dir.exists():
@@ -250,6 +281,7 @@ def main() -> None:
         onnx_dir=args.onnx_dir,
         test_dir=args.test_dir,
         output_path=args.output,
+        threads=args.threads,
     )
 
 
