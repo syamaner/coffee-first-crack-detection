@@ -38,7 +38,7 @@ Model: [syamaner/coffee-first-crack-detection](https://huggingface.co/syamaner/c
 
 
 def load_example(choice: str | None) -> str | None:
-    """Fetch a named example clip from the model repo (cached locally).
+    """Fetch a named example clip from the model repo into /tmp (Gradio-safe).
 
     Args:
         choice: Key from ``_EXAMPLES``, or None.
@@ -48,7 +48,8 @@ def load_example(choice: str | None) -> str | None:
     """
     if not choice or choice not in _EXAMPLES:
         return None
-    return hf_hub_download(repo_id=_REPO_ID, filename=_EXAMPLES[choice])
+    # local_dir="/tmp" ensures the path is inside /tmp, which Gradio 6.x allows
+    return hf_hub_download(repo_id=_REPO_ID, filename=_EXAMPLES[choice], local_dir="/tmp")
 
 
 def classify(audio_path: str | None) -> dict[str, float]:
