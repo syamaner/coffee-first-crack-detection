@@ -80,10 +80,14 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 
 **RPi5 Validation** (issue #22, branch `feature/22-rpi5-onnx-validation`):
 - Quality: 93.3% acc / 0.933 F1 — identical to Mac across all ONNX variants
-- **Best config**: INT8, 4 threads, with fan → **p50 = 2,070ms** (stable, no throttling)
+- **Production config**: INT8, 2 threads, threshold=0.90, adequate PSU + fan → **p50 = 2,452ms**
+- 2 threads chosen to leave 2 cores free for MCP server + agent UI running on the same Pi
+- Threshold 0.90: precision=0.952, recall=0.909, F1=0.930 — only 1 FP on test set
+- Threshold sweep + parameter simulation completed — see `results/` for full data
+- ONNX inference module (`inference_onnx.py`) loads models from HF Hub with `--profile pi_inference`
 - Latency breakdown: feature extraction 49ms (2%), ONNX model inference 2,019ms (98%)
 - The AST model (87M params) is the bottleneck — too large for <500ms on RPi5 ARM64 CPU
-- Hardware requirements: adequate PSU + active cooler for 4-thread operation
+- Hardware requirements: adequate PSU + active cooler for stable 2-thread operation
 - See "RPi5 Validation Results" section below for full breakdown
 
 **Dataset**: NOT yet published — pending annotation of mic-2 recordings.
@@ -171,7 +175,7 @@ Feature extraction is negligible. The bottleneck is entirely in the ONNX model f
 - **Thermal (with fan)**: 4 threads stable at 45°C, no throttling, consistent latency.
 - **Stability**: 1 thread stable on any PSU; 2+ threads need adequate PSU; 4 threads need adequate PSU + fan.
 - **NVMe**: Boot from NVMe (Gen 2, default) — no PCIe stability issues observed.
-- **Recommended config**: INT8 model, 4 threads, adequate PSU + active cooler.
+- **Recommended config**: INT8 model, 2 threads (leaves cores for MCP/UI), threshold=0.90, adequate PSU + active cooler.
 
 ### Latency Analysis & Next Steps
 
@@ -199,5 +203,7 @@ Feature extraction is negligible. The bottleneck is entirely in the ONNX model f
 - ONNX-only scripts (`evaluate_onnx.py`, `benchmark_onnx_pi.py`) avoid 148MB PyTorch install on Pi for model inference, though PyTorch CPU is still needed for `ASTFeatureExtractor` filterbank computation
 - Thread limiting (`--threads` flag, default 2 on ARM64) is essential for RPi5 stability with standard PSUs
 - RPi5 requires adequate PSU for multi-thread — standard USB-C chargers (even 96W Apple) only provide 5V/3A
-- Active cooling is mandatory for 4-thread inference (recommended config)
+- Active cooling recommended for 2+ thread inference — mandatory for 4-thread
+- Production Pi runs MCP server + agent UI alongside inference — 2 ONNX threads leaves 2 cores free
+- Detection threshold 0.90 chosen from threshold sweep: best F1/FP tradeoff (precision=0.952, 1 FP on 45-sample test set)
 - Feature extraction is only 2% of total latency — optimizing it (e.g. C++ STFT) would be wasteful
