@@ -1,0 +1,27 @@
+{
+  "model": "exports/onnx/int8/model_quantized.onnx",
+  "model_size_mb": 89.9,
+  "threads": 2,
+  "n_samples": 45,
+  "accuracy": 0.9333,
+  "f1": 0.9333,
+  "precision": 0.913,
+  "recall_first_crack": 0.9545,
+  "confusion_matrix": [
+    [
+      21,
+      2
+    ],
+    [
+      1,
+      21
+    ]
+  ],
+  "latency": {
+    "p50_ms": 2436.018143999945,
+    "p95_ms": 2703.4568171999126,
+    "mean_ms": 2499.127930822235,
+    "min_ms": 2398.14245499997,
+    "max_ms": 2738.55666999998
+  }
+}

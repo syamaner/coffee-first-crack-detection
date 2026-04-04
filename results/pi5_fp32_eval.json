@@ -1,0 +1,27 @@
+{
+  "model": "exports/onnx/fp32/model.onnx",
+  "model_size_mb": 345.0,
+  "threads": 1,
+  "n_samples": 45,
+  "accuracy": 0.9333,
+  "f1": 0.9333,
+  "precision": 0.913,
+  "recall_first_crack": 0.9545,
+  "confusion_matrix": [
+    [
+      21,
+      2
+    ],
+    [
+      1,
+      21
+    ]
+  ],
+  "latency": {
+    "p50_ms": 9412.007528000004,
+    "p95_ms": 9484.274198200046,
+    "mean_ms": 9424.23166022221,
+    "min_ms": 9387.167635999958,
+    "max_ms": 9487.229570999943
+  }
+}

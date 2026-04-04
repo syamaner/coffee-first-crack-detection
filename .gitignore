@@ -211,7 +211,6 @@ data/
 experiments/
 exports/
 venv/
-*.pt
 *.onnx
 *.safetensors
 runs/
