@@ -216,3 +216,4 @@ venv/
 *.safetensors
 runs/
 docs/notes.md
+.DS_Store

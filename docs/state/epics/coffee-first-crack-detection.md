@@ -1,7 +1,7 @@
 # Epic: Coffee First Crack Detection — HuggingFace Model Repository
 
 **GitHub Issue**: [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1)
-**Status**: ✅ Phases 1–5 complete — pending dataset annotation, retraining & Pi hardware
+**Status**: 🟡 Phase 6 in progress — data prep complete, retraining with tuned hyperparams
 **Last Updated**: 2026-04-04
 
 ## Objective
@@ -62,11 +62,40 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
     - Requires adequate PSU + active cooler for production use
   - **INT8 is the recommended model for RPi5** — 2x faster than FP32, zero quality loss
 
+### Phase 6 — Dataset Expansion & Retraining
+- [ ] S16 [#26](https://github.com/syamaner/coffee-first-crack-detection/issues/26): Unified data preparation pipeline with fixed-size chunking
+  - ✅ New `data_prep` module: `convert_labelstudio_export.py`, `chunk_audio.py`, `dataset_splitter.py`
+  - ✅ All 15 files re-annotated with single-region approach in Label Studio
+  - ✅ Chunking: 973 chunks (197 FC / 776 NFC, ~20% first_crack), fixed 10s windows
+  - ✅ Recording-level split: train=587 (9 recs), val=195 (3 recs), test=191 (3 recs)
+  - ✅ Training (baseline_v2, tuned): best epoch 2 — 95.38% val acc / 0.866 F1, early stopped epoch 5
+  - ✅ Test eval: **97.4% acc / 0.925 F1 / 100% precision / 86.1% recall / 0.982 ROC-AUC**
+  - ✅ Full-recording detection latency: 0.0s, 0.3s (mic-1), 27.4s (mic-2) — all detected
+  - Hyperparams tuned: lr 5e-5→2e-5, weight_decay 0.01→0.05, early_stopping 5→3
+- [ ] S17 [#24](https://github.com/syamaner/coffee-first-crack-detection/issues/24): Capture mic-2 recordings and expand dataset
+
 ---
 
 ## Active Context
 
-**All 14 stories + RPi5 validation (S15) complete.** 15 stories across 5 phases.
+**Phase 6 in progress.** S16 (#26) — data prep + training + evaluation complete.
+
+**Dataset v2**: 973 fixed 10s chunks from 15 recordings (9 legacy + 6 mic2)
+- 197 first_crack (~20%) / 776 no_first_crack (~80%)
+- Recording-level splitting prevents data leakage
+- All files re-annotated with single-region approach (1 first_crack region per roast)
+
+**baseline_v2 training (tuned hyperparams)**:
+- Attempt 1 (lr=5e-5): peaked epoch 7 at 95.38% / 0.866 F1, oscillating loss, overfitting
+- Attempt 2 (lr=2e-5, weight_decay=0.05, early_stop=3): best epoch 2, early stopped epoch 5
+- Test set: **97.4% acc / 0.925 F1 / 100% precision / 86.1% recall / 0.982 ROC-AUC**
+- Zero false positives (0 FP), 5 false negatives (5 FN out of 36 FC chunks)
+
+**Full-recording detection latency** (sliding window on raw test WAVs):
+- 25-10-19_1236-brazil-3 (mic-1): onset 452.7s → detected 453.0s — **0.3s delay**
+- mic2-brazil-roast2 (mic-2): onset 599.6s → detected 627.0s — **27.4s delay**
+- roast-2-costarica-hermosa-hp-a (mic-1): onset 441.0s → detected 441.0s — **0.0s delay**
+- Mic-1 detection is near-instant; mic-2 has higher delay due to less training data from that mic
 
 **Model on HuggingFace**: https://huggingface.co/syamaner/coffee-first-crack-detection
 - baseline_v1: 91.1% test acc / 0.913 F1 / 95.5% first_crack recall / 0.978 ROC-AUC
@@ -90,7 +119,7 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 - Hardware requirements: adequate PSU + active cooler for stable 2-thread operation
 - See "RPi5 Validation Results" section below for full breakdown
 
-**Dataset**: NOT yet published — pending annotation of mic-2 recordings.
+**Dataset**: NOT yet published — pending push to HF Hub.
 
 **Blog series**: planned 3-part series covering training, MCP servers, and .NET Aspire agent.
 
@@ -98,27 +127,7 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 
 ## Pending Work
 
-### 1. Annotate mic-2 recordings in Label Studio
-- 4 WAV files in `data/raw/`: `mic2-brazil-roast{1..4}-*.wav`
-- Follow `docs/data_preparation.md` Label Studio steps
-- Export JSON → run `convert_labelstudio_export.py`
-
-### 2. Expand dataset and re-split
-```bash
-python -m coffee_first_crack.data_prep.chunk_audio \
-  --labels-dir data/labels --audio-dir data/raw --output-dir data/processed
-
-python -m coffee_first_crack.data_prep.dataset_splitter \
-  --input data/processed --output data/splits --train 0.7 --val 0.15 --test 0.15 --seed 42
-```
-
-### 3. Retrain on expanded dataset (mic-1 + mic-2)
-```bash
-python -m coffee_first_crack.train \
-  --data-dir data/splits --experiment-name baseline_v2 --push-to-hub
-```
-
-### 4. Push updated dataset to HuggingFace
+### 1. Push baseline_v2 model + dataset to HuggingFace
 ```bash
 python scripts/push_to_hub.py \
   --dataset-dir data/splits \
@@ -138,6 +147,8 @@ python scripts/push_to_hub.py \
 |-----|----------|----|-------------|-------|
 | Original prototype | ~93% | ~0.93 | 100% | coffee-roasting monorepo, custom Trainer |
 | baseline_v1 (mic-1 only, MPS) | 95.6% (val) / 91.1% (test) | 0.955 / 0.913 | 95.5% | PR #18, 208 train samples |
+| baseline_v2 MPS attempt 1 | 95.38% (val, epoch 7) | 0.866 | — | 587 train, overfitting after epoch 7, lr too high |
+| **baseline_v2 (tuned, MPS)** | **97.4% (test)** | **0.925** | **86.1%** | **973 chunks, 15 recs, 100% precision, 0 FP** |
 | ONNX FP32 (Mac, auto threads) | 93.3% | 0.933 | 95.5% | p50=375ms ✅ |
 | ONNX INT8 (Mac, auto threads) | 93.3% | 0.933 | 95.5% | p50=197ms ✅ |
 | ONNX INT8 (RPi5, 4 threads, fan) | 93.3% | 0.933 | 95.5% | p50=2,070ms ⭐ recommended |

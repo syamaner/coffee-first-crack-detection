@@ -58,24 +58,12 @@ Opens at http://localhost:8080
 <View>
   <Audio name="audio" value="$audio" zoom="true" waveformHeight="100"/>
   <Labels name="label" toName="audio">
-    <Label value="first_crack" background="red"/>
-    <Label value="no_first_crack" background="green"/>
+    <Label value="first_crack" background="#FF0000"/>
   </Labels>
-  <TimeSeriesLabels name="ts" toName="audio">
-  </TimeSeriesLabels>
 </View>
 ```
 
-> **Simpler alternative** — if the above is complex, use just:
-> ```xml
-> <View>
->   <Audio name="audio" value="$audio"/>
->   <Labels name="label" toName="audio">
->     <Label value="first_crack" background="#FF0000"/>
->   </Labels>
-> </View>
-> ```
-> Then label **only** the `first_crack` region. Everything else is implicitly `no_first_crack`.
+Only the `first_crack` label is needed. Everything outside annotated regions is implicitly `no_first_crack`.
 
 ### 2d. Import audio files
 
@@ -88,18 +76,18 @@ Opens at http://localhost:8080
 
 1. Click a task to open it
 2. You will see the waveform. Press **Play** to listen
-3. **To mark a first crack region:**
-   - Select the `first_crack` label in the left panel (it turns active/highlighted)
-   - Click and drag on the waveform to draw the region where first crack sounds begin
-   - First crack starts when you first hear the popping/crackling sounds
-   - The region should span from the **first pop** to the **end of consistent cracking** (typically 2–5 minutes of audio within a 10-second window context)
-   - You can draw **multiple regions** if there are multiple crack bursts
+3. **Draw one `first_crack` region per roast:**
+   - Select the `first_crack` label in the left panel
+   - Click and drag on the waveform to draw **one region** from the **first pop** to the **end of consistent cracking**
+   - This region typically spans 1–5 minutes of audio
+   - You do NOT need to annotate individual pops — one continuous region is correct
+   - The chunking pipeline (Step 4) will slice this into fixed 10-second training windows
 4. Press **Submit** (or Ctrl+Enter) to save the annotation
 5. Move to the next task
 
 ### 2f. Tips for accurate annotation
 
-- **Zoom in** on the waveform (scroll wheel) to see individual pops
+- **Zoom in** on the waveform (scroll wheel) to find the first pop precisely
 - Use **spacebar** to pause/resume playback
 - First crack pops are sharp transient spikes in the waveform — visually distinct from background noise
 - When in doubt, mark a slightly wider region rather than too narrow
@@ -141,12 +129,18 @@ python -m coffee_first_crack.data_prep.chunk_audio \
   --sample-rate 44100
 ```
 
+Slides a fixed 10-second window across each recording. Each window is labelled `first_crack` if ≥50% of it overlaps with annotated first crack regions, otherwise `no_first_crack`.
+
 Output structure:
 ```
 data/processed/
-  first_crack/      ← 10s windows that contain first crack
+  first_crack/      ← 10s windows that overlap ≥50% with first crack
   no_first_crack/   ← 10s windows of background roast noise
+  processing_summary.md
 ```
+
+Chunk filenames encode the source recording and window start time:
+`roast-1-costarica-hermosa-hp-a_w0530.0.wav` = window starting at 530.0s.
 
 ---
 
@@ -159,6 +153,8 @@ python -m coffee_first_crack.data_prep.dataset_splitter \
   --train 0.7 --val 0.15 --test 0.15 \
   --seed 42
 ```
+
+Splits at the **recording level** (not chunk level) to prevent data leakage — all chunks from the same source recording go to the same split.
 
 Output:
 ```
@@ -199,9 +195,9 @@ This auto-parses filenames to extract microphone and coffee origin metadata.
 
 | Source | Mic | Origin | Files | Status |
 |--------|-----|--------|-------|--------|
-| Original prototype | mic-1-original | costarica-hermosa | 4 roasts | ✅ In `coffee-roasting` splits |
-| Original prototype | mic-1-original | brazil | 2 roasts | ✅ In `coffee-roasting` splits |
-| New recordings | mic-2-new | brazil | 4 of 5 roasts | ⏳ In `data/raw/`, pending annotation |
-| New recordings | mic-2-new | brazil | roast5 | 🔲 Not yet recorded |
+| Original prototype | mic-1-original | costarica-hermosa | 4 roasts | ⏳ Re-annotate with single-region approach |
+| Original prototype | mic-1-original | brazil | 5 roasts | ⏳ Re-annotate with single-region approach |
+| New recordings | mic-2-new | brazil | 4 roasts | ⏳ Pending annotation |
+| New recordings | mic-2-new | brazil-santos | 2 roasts | ⏳ Pending annotation |
 
-> Once annotation is complete for all 5 mic-2 files, re-run Steps 3–6 on the combined dataset (merge with existing 298 chunks from `coffee-roasting/data/processed/`).
+> All 15 files should be annotated with the single-region approach (one `first_crack` region per roast). Then run Steps 3–6 to produce the full dataset.

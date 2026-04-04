@@ -29,16 +29,19 @@ model-index:
       split: test
     metrics:
     - type: accuracy
-      value: 0.911
+      value: 0.974
       name: Test Accuracy
     - type: f1
-      value: 0.913
+      value: 0.925
       name: Test F1 (macro)
+    - type: precision
+      value: 1.000
+      name: Test Precision (first_crack)
     - type: recall
-      value: 0.955
+      value: 0.861
       name: Test Recall (first_crack)
     - type: roc_auc
-      value: 0.978
+      value: 0.982
       name: Test ROC-AUC
 ---
 
@@ -180,37 +183,50 @@ print(f"first_crack prob: {probs[0, 1]:.3f}")
 |-----------|-------|
 | Base model | MIT/ast-finetuned-audioset-10-10-0.4593 |
 | Optimizer | AdamW |
-| Learning rate | 5e-5 |
+| Learning rate | 2e-5 |
 | Batch size | 8 |
-| Epochs | up to 20 (early stop on val F1) |
+| Epochs | 5 (early stop patience=3, best epoch 2) |
+| Weight decay | 0.05 |
 | Loss | Class-weighted CrossEntropyLoss |
 | Crop mode (train) | Random |
 | Crop mode (eval) | Center |
 
-Training hardware: Apple M3+ Mac (MPS).
+Training hardware: Apple M3+ Mac (MPS). Dataset: 973 fixed 10s chunks from 15 recordings.
 
 ---
 
 ## Evaluation
 
-**baseline_v1** — mic-1 recordings only (Costa Rica Hermosa HP + Brazil), Apple M3 Mac (MPS).
+**baseline_v2** — 15 recordings (9 legacy mic-1 + 6 new mic-2), Apple M3 Mac (MPS).
 
 | Metric | Val | Test |
 |--------|-----|------|
-| Accuracy | 95.6% | 91.1% |
-| F1 (macro) | 0.955 | 0.913 |
-| Recall (`first_crack`) | — | 95.5% |
-| ROC-AUC | — | 0.978 |
-| Dataset split | 45 samples | 45 samples |
+| Accuracy | 95.4% | **97.4%** |
+| F1 (macro) | 0.866 | **0.925** |
+| Precision (`first_crack`) | — | **100%** |
+| Recall (`first_crack`) | — | 86.1% |
+| ROC-AUC | — | **0.982** |
+| Dataset split | 195 samples | 191 samples |
 
-Full dataset: 298 × 10 s chunks, 208 / 45 / 45 train / val / test split.
+Full dataset: 973 × 10s chunks (fixed sliding window), 587 / 195 / 191 train / val / test split (recording-level, no data leakage).
+
+**Detection latency on full-length test recordings:**
+
+| Recording | Mic | Onset | Detected | Delay |
+|-----------|-----|-------|----------|-------|
+| 25-10-19_1236-brazil-3 | mic-1 | 452.7s | 453.0s | **0.3s** |
+| mic2-brazil-roast2 | mic-2 | 599.6s | 627.0s | **27.4s** |
+| roast-2-costarica-hermosa-hp-a | mic-1 | 441.0s | 441.0s | **0.0s** |
+
+**ONNX INT8 (quantized):** 96.9% acc / 0.912 F1 — near-identical to PyTorch, 1 additional FP from quantization.
 
 ---
 
 ## Limitations
 
-- Small dataset (~300 chunks from 6 roasts) — generalisation to very different roasters/environments is uncertain
-- Trained primarily on Costa Rica Hermosa HP and Brazil origins — other origins may vary
+- Dataset of 973 chunks from 15 roasts — generalisation to very different roasters/environments is uncertain
+- Trained on Costa Rica Hermosa HP, Brazil, and Brazil Santos origins — other origins may vary
+- Mic-2 detection latency (~27s) is higher than mic-1 (~0s) — more mic-2 training data would help
 - Microphone quality matters: model trained on two different microphones (mic-1-original, mic-2-new)
 - No second crack detection — model is binary only
 - Not validated in commercial roasting environments
