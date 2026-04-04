@@ -1,0 +1,26 @@
+{
+  "model": "/Users/sertanyamaner/git/coffee-first-crack-detection/exports/onnx/int8/model_quantized.onnx",
+  "model_size_mb": 89.9,
+  "n_samples": 45,
+  "accuracy": 0.9333,
+  "f1": 0.9333,
+  "precision": 0.913,
+  "recall_first_crack": 0.9545,
+  "confusion_matrix": [
+    [
+      21,
+      2
+    ],
+    [
+      1,
+      21
+    ]
+  ],
+  "latency": {
+    "p50_ms": 197.26104199071415,
+    "p95_ms": 200.29847540427,
+    "mean_ms": 197.76560746508443,
+    "min_ms": 194.84170898795128,
+    "max_ms": 203.43166700331494
+  }
+}
