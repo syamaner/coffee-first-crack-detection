@@ -46,15 +46,30 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
   - Sliding-window demo with assembled roast recording and probability timeline plot
 - [x] S14 [#15](https://github.com/syamaner/coffee-first-crack-detection/issues/15): Write pytest test suite ✅
 
+### Phase 5 — Edge Validation
+- [x] S15 [#22](https://github.com/syamaner/coffee-first-crack-detection/issues/22): Validate ONNX inference on Raspberry Pi 5 ✅
+  - ONNX export: FP32 (345MB) + INT8 quantized (90MB)
+  - Created `scripts/evaluate_onnx.py` and `scripts/benchmark_onnx_pi.py` (no PyTorch dep)
+  - Added `--threads` param for power-limited ARM64 devices
+  - Quality: 93.3% acc / 0.933 F1 — identical across FP32/INT8 and Mac/RPi5
+  - Latency: 4.4s (INT8, 1 thread) — above 500ms target (see notes below)
+  - Hardware issue: RPi5 crashes with >1 ONNX thread on 5V/3A PSU (needs 5V/5A + active cooling)
+
 ---
 
 ## Active Context
 
-**All 14 stories complete.** Repository, model card, and quickstart notebook shipped.
+**All 14 stories + RPi5 validation complete.**
 
 **Model on HuggingFace**: https://huggingface.co/syamaner/coffee-first-crack-detection
 - baseline_v1: 91.1% test acc / 0.913 F1 / 95.5% first_crack recall / 0.978 ROC-AUC
 - Trained on mic-1 only (298 chunks, 6 roasts)
+
+**RPi5 Validation** (issue #22, branch `feature/22-rpi5-onnx-validation`):
+- INT8 ONNX accuracy matches Mac exactly (93.3% / 0.933 F1) — zero quantization loss
+- Latency does NOT meet 500ms target on RPi5 with current AST model
+- Hardware blockers: requires 5V/5A PSU (official RPi5 27W) + active cooling
+- See "RPi5 Latency Results" section below for full numbers
 
 **Dataset**: NOT yet published — pending annotation of mic-2 recordings.
 
@@ -102,6 +117,28 @@ python scripts/push_to_hub.py \
 |-----|----------|----|-------------|-------|
 | Original prototype | ~93% | ~0.93 | 100% | coffee-roasting monorepo, custom Trainer |
 | baseline_v1 (mic-1 only, MPS) | 95.6% (val) / 91.1% (test) | 0.955 / 0.913 | 95.5% | PR #18, 208 train samples |
+| ONNX FP32 (Mac, auto threads) | 93.3% | 0.933 | 95.5% | p50=375ms |
+| ONNX INT8 (Mac, auto threads) | 93.3% | 0.933 | 95.5% | p50=197ms |
+| ONNX INT8 (RPi5, 1 thread) | 93.3% | 0.933 | 95.5% | p50=4,441ms |
+| ONNX FP32 (RPi5, 1 thread) | 93.3% | 0.933 | 95.5% | p50=9,412ms |
+
+### RPi5 Latency Results
+
+Tested on RPi5 Model B Rev 1.1 (16GB), aarch64, Python 3.13.5, ONNX Runtime 1.24.4.
+Limited to 1 thread due to under-voltage crashes with 5V/3A PSU (no active cooling).
+
+| Model | Size | p50 (ms) | Target | Status |
+|-------|------|----------|--------|--------|
+| INT8 (RPi5, 1 thread) | 90MB | 4,441 | <500ms | ⚠️ FAIL |
+| FP32 (RPi5, 1 thread) | 345MB | 9,412 | <500ms | ⚠️ FAIL |
+| INT8 (Mac, auto) | 90MB | 197 | <500ms | ✅ PASS |
+| FP32 (Mac, auto) | 345MB | 375 | <500ms | ✅ PASS |
+
+**Next steps for latency:**
+- Re-test with proper 5V/5A PSU + active cooler (expect ~4x faster with 4 threads → ~1.1s)
+- Even with 4 threads, AST model (87M params) is likely too large for <500ms on RPi5
+- Consider smaller model architectures (MobileNetV3, EfficientNet-B0) for real-time Pi use
+- Alternative: offload inference to a companion device (Mac/PC) via network
 
 ---
 
