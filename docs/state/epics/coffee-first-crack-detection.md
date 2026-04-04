@@ -1,7 +1,7 @@
 # Epic: Coffee First Crack Detection — HuggingFace Model Repository
 
 **GitHub Issue**: [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1)
-**Status**: 🟡 Phase 6 in progress — S16 complete, S25 (Spaces UI) in progress
+**Status**: 🟡 Phase 6 in progress — S16 ✅ S18 ✅ pending S17 (mic-2 data)
 **Last Updated**: 2026-04-04
 
 ## Objective
@@ -84,7 +84,13 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 
 ## Active Context
 
-**Phase 6 in progress.** S16 (#26) complete (merged). S18 (#25) complete — HF inference widget live on model card.
+**Phase 6 in progress.** S16 (#26) complete. S18 (#25) complete — Gradio Space live, widget examples working.
+
+**Gradio Space** (S18 / #25): https://huggingface.co/spaces/syamaner/coffee-first-crack-detection
+- Dropdown: "First crack (10s)" / "No first crack (10s)" pre-loaded examples
+- Upload any 10s WAV → first_crack / no_first_crack probability bars
+- Linked to model card via `models:` field (appears in "Spaces using this model")
+- `spaces/` committed to git; Gradio 6.11.0, CPU free tier
 
 **Dataset v2**: 973 fixed 10s chunks from 15 recordings (9 legacy + 6 mic2)
 - 197 first_crack (~20%) / 776 no_first_crack (~80%)
