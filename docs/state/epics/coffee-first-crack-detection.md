@@ -73,10 +73,12 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
   - ✅ Full-recording detection latency: 0.0s, 0.3s (mic-1), 27.4s (mic-2) — all detected
   - Hyperparams tuned: lr 5e-5→2e-5, weight_decay 0.01→0.05, early_stopping 5→3
 - [ ] S17 [#24](https://github.com/syamaner/coffee-first-crack-detection/issues/24): Capture mic-2 recordings and expand dataset
-- [x] S18 [#25](https://github.com/syamaner/coffee-first-crack-detection/issues/25): Add HuggingFace inference widget to model card ✅
+- [x] S18 [#25](https://github.com/syamaner/coffee-first-crack-detection/issues/25): Add HuggingFace inference Space + widget to model card ✅
   - `widget` block added to README.md frontmatter YAML
   - Two example WAVs uploaded to HF model repo under `audio_examples/` (16kHz, 10s)
-  - Built-in HF Inference Providers widget enabled on model card
+  - Gradio Space live at https://huggingface.co/spaces/syamaner/coffee-first-crack-detection
+  - Space linked to model card via `models:` field — appears in "Spaces using this model"
+  - `spaces/` directory committed to git for version control
 
 ---
 
