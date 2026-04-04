@@ -56,7 +56,6 @@ inference:
 
 export:
   output_dir: "exports/onnx"
-  opset_version: 14
   quantize_int8: true
 
 paths:
