@@ -17,6 +17,29 @@ metrics:
   - f1
   - precision
   - recall
+model-index:
+- name: coffee-first-crack-detection
+  results:
+  - task:
+      type: audio-classification
+      name: Audio Classification
+    dataset:
+      name: Coffee First Crack Audio
+      type: syamaner/coffee-first-crack-audio
+      split: test
+    metrics:
+    - type: accuracy
+      value: 0.911
+      name: Test Accuracy
+    - type: f1
+      value: 0.913
+      name: Test F1 (macro)
+    - type: recall
+      value: 0.955
+      name: Test Recall (first_crack)
+    - type: roc_auc
+      value: 0.978
+      name: Test ROC-AUC
 ---
 
 # Coffee First Crack Detection
@@ -141,14 +164,17 @@ Training hardware: Apple M3+ Mac (MPS).
 
 ## Evaluation
 
-> Results will be updated after retraining on the expanded dataset (mic-1 + mic-2).
+**baseline_v1** — mic-1 recordings only (Costa Rica Hermosa HP + Brazil), Apple M3 Mac (MPS).
 
-| Metric | Prototype (mic-1 only) |
-|--------|----------------------|
-| Accuracy | ~93% |
-| F1 | ~0.93 |
-| Recall (first_crack) | 100% |
-| Dataset | 298 chunks, 208/45/45 train/val/test |
+| Metric | Val | Test |
+|--------|-----|------|
+| Accuracy | 95.6% | 91.1% |
+| F1 (macro) | 0.955 | 0.913 |
+| Recall (`first_crack`) | — | 95.5% |
+| ROC-AUC | — | 0.978 |
+| Dataset split | 45 samples | 45 samples |
+
+Full dataset: 298 × 10 s chunks, 208 / 45 / 45 train / val / test split.
 
 ---
 
