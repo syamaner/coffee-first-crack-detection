@@ -7,23 +7,11 @@ the transformers audio-classification pipeline.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import gradio as gr
-from huggingface_hub import hf_hub_download
 from transformers import pipeline
 
 _REPO_ID = "syamaner/coffee-first-crack-detection"
-_EXAMPLE_DIR = Path("audio_examples")
-_EXAMPLE_DIR.mkdir(exist_ok=True)
-
-# Download example clips from the model repo at startup (not committed to git)
-for _label in ("first_crack", "no_first_crack"):
-    hf_hub_download(
-        repo_id=_REPO_ID,
-        filename=f"audio_examples/{_label}_sample.wav",
-        local_dir=".",
-    )
+_HF_BASE = f"https://huggingface.co/{_REPO_ID}/resolve/main/audio_examples"
 
 # Load model pipeline once at startup
 _pipe = pipeline("audio-classification", model=_REPO_ID)
@@ -71,8 +59,8 @@ demo = gr.Interface(
     title="☕ Coffee First Crack Detection",
     description=_DESCRIPTION,
     examples=[
-        [str(_EXAMPLE_DIR / "first_crack_sample.wav")],
-        [str(_EXAMPLE_DIR / "no_first_crack_sample.wav")],
+        [f"{_HF_BASE}/first_crack_sample.wav"],
+        [f"{_HF_BASE}/no_first_crack_sample.wav"],
     ],
     cache_examples=False,
 )
