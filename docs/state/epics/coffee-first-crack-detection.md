@@ -57,7 +57,7 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 - PR #17: export_onnx.py, benchmark_platforms.py, push_to_hub.py, tests
 - PR #18: input_values key fix, accelerate dep, build backend fix, training validated
 - PR #19: docs state update — 13/14 complete
-- PR #20 (pending): notebooks/quickstart.ipynb
+- S13 delivered via quickstart notebook update: notebooks/quickstart.ipynb
 
 **Blockers**:
 - 5 new mic-2 WAV recordings in `data/raw/` need Label Studio annotation before final dataset can be published to HuggingFace. This does not block the notebook.
