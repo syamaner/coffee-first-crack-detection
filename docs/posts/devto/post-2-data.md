@@ -1,5 +1,5 @@
 ---
-title: "Part 2: The Data — Building the First Public Coffee Roasting Audio Dataset"
+title: "Part 2: The Data — Building the First Public Coffee Roasting Audio Dataset with Warp/Oz"
 published: false
 description: "There was no public audio dataset for coffee roasting first crack detection anywhere on the internet. Before training anything, I had to build one from scratch — and the annotation and data engineering decisions made the difference between 87.5% precision and 100%."
 tags: machinelearning, python, audio, huggingface
