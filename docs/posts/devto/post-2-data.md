@@ -145,3 +145,65 @@ def extract_recording_stem(chunk_filename: str) -> str:
 
 Once recordings are grouped, a stratified split assigns them 70/15/15 — stratified by whether each recording contains any first crack chunks, so FC-containing recordings are distributed across all three sets rather than clustering in one. The result is 15 recordings split 9/3/3, producing 587/195/191 chunks. Every chunk in the 191-sample test set comes from a recording the model had never encountered in any form during training.
 
+## Class Imbalance
+
+The sliding-window approach exposes the real-world distribution: **197 first_crack chunks out of 973 total — 20%**. A model predicting `no_first_crack` for every sample would score 80% accuracy without learning anything. Standard `CrossEntropyLoss` treats all samples equally, so it provides 4× more gradient signal from the majority class per epoch. On a dataset this skewed, uncorrected training converges toward majority-class bias — high accuracy, catastrophic recall on the minority class.
+
+The old prototype masked this problem entirely. Its annotation style produced a roughly 50/50 train split (101 FC / 107 NFC), so class imbalance was never a factor. Switching to the sliding-window pipeline revealed what the distribution actually looks like at inference time.
+
+The fix is `WeightedLossTrainer` — a two-line subclass of the HuggingFace `Trainer` that overrides `compute_loss` to use class-weighted `CrossEntropyLoss`:
+
+```python
+# src/coffee_first_crack/train.py
+class WeightedLossTrainer(Trainer):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        labels = inputs.pop("labels")
+        outputs = model(**inputs)
+        logits = outputs.logits
+        weights = self.class_weights.to(logits.device)
+        loss_fn = nn.CrossEntropyLoss(weight=weights)
+        loss = loss_fn(logits, labels)
+        return (loss, outputs) if return_outputs else loss
+```
+
+The weights are computed from the training set using inverse-frequency balancing:
+
+```python
+# src/coffee_first_crack/dataset.py
+def get_class_weights(self) -> torch.Tensor:
+    counts = {0: 0, 1: 0}
+    for _, label in self.samples:
+        counts[label] += 1
+    total = len(self.samples)
+    return torch.FloatTensor([
+        total / (2 * counts[0]),  # no_first_crack (majority → lower weight)
+        total / (2 * counts[1]),  # first_crack (minority → higher weight)
+    ])
+```
+
+The minority class gets proportionally more loss contribution per sample, countering the gradient imbalance without resampling or augmentation.
+
+This does introduce a precision/recall tradeoff. Giving the minority class more training signal raises recall — the model detects more first crack windows — but it can also push the decision boundary toward more false positives. For roasting automation, **a false positive is worse than a false negative**: misidentifying a background noise chunk as first crack could trigger an incorrect action mid-roast, while a missed window just delays detection by 10 seconds. The result reflects that priority: **100% precision, 86.1% recall, 0 false positives**. The model is conservative about committing to a detection.
+
+## Dataset by the Numbers
+
+The full dataset is published at [huggingface.co/datasets/syamaner/coffee-first-crack-audio](https://huggingface.co/datasets/syamaner/coffee-first-crack-audio). The source recordings, annotation JSONs, and pipeline code are in the [GitHub repository](https://github.com/syamaner/coffee-first-crack-detection).
+
+| | |
+|---|---|
+| **Total chunks** | 973 (10-second WAV, 16kHz mono) |
+| **first_crack** | 197 (~20%) |
+| **no_first_crack** | 776 (~80%) |
+| **Recordings** | 15 (9 mic-1 FIFINE 669B, 6 mic-2 ATR2100x) |
+| **Bean origins** | Costa Rica Hermosa, Brazil, Brazil Santos |
+| **Split (recordings)** | 9 train / 3 val / 3 test |
+| **Split (chunks)** | 587 train / 195 val / 191 test |
+| **Annotation tool** | Label Studio — one `first_crack` region per recording |
+| **Chunking** | Fixed 10s window, ≥50% overlap threshold |
+| **Split strategy** | Recording-level (prevents data leakage) |
+| **License** | CC-BY-4.0 |
+
+All four engineering decisions described in this post — the annotation redesign, fixed sliding-window chunking, recording-level splits, and class-weighted training — are encoded in the pipeline and reproducible from the published data.
+
+[Post 3](<!-- TODO: link -->) covers the training story: two hyperparameter attempts, the oscillating loss from a learning rate that was too aggressive for 587 samples, and the diagnosis that got from **87.5% to 100% precision**.
+
