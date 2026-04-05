@@ -87,7 +87,7 @@ With the annotation strategy locked, the problem shifted from domain judgment ba
 
 Here is Oz executing the full pipeline — Label Studio conversion, chunking all 973 segments, and recording-level split — before immediately invoking the `/train-model` skill:
 
-{% embed <!-- TODO: Warp Block Link — PR #27 pipeline execution session --> %}
+{% embed  https://app.warp.dev/block/IipUeAWACd6rCZgkoOroOL?preview=true %}
 
 ## Data Leakage
 
