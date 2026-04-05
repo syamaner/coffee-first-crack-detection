@@ -89,3 +89,59 @@ Here is Oz executing the full pipeline — Label Studio conversion, chunking all
 
 {% embed <!-- TODO: Warp Block Link — PR #27 pipeline execution session --> %}
 
+## Data Leakage
+
+Audio ML has a specific leakage trap that doesn't exist in the same way for tabular or image data. A recording's acoustic fingerprint is constant throughout — the background drum hum, the extractor hood (home roasting), noise form outside (street), the room resonance, the mic's frequency response. A model trained on chunks from `roast-1` and evaluated on other chunks from `roast-1` isn't generalising. It is recognising the session.
+
+The old prototype had exactly this problem. Its train/test split was done at the chunk level:
+
+```
+# coffee-roasting prototype — splits/
+test/first_crack/roast-1-costarica-hermosa-hp-a_chunk_018.wav
+train/first_crack/roast-1-costarica-hermosa-hp-a_chunk_019.wav
+train/first_crack/roast-1-costarica-hermosa-hp-a_chunk_020.wav
+```
+
+`chunk_018` and `chunk_019` are consecutive windows from the same roasting session, milliseconds apart in time, sharing identical background characteristics. The prototype's 91.1% accuracy on that test set was real arithmetic on real predictions. The generalisation it implied was not — the model had acoustically seen those recordings before.
+
+```mermaid
+flowchart TD
+    subgraph Wrong ["❌ The Wrong Way: Chunk-Level Split (Data Leakage)"]
+        direction TB
+        RA["Recording A: 'Brazil Santos'"] --> A1[Chunk A1] & A2[Chunk A2] & A3[Chunk A3]
+        A1 & A3 --> TR1[Train Set]
+        A2 --> TE1[Test Set]
+        style TR1 fill:#ffebee,stroke:#c62828,stroke-width:2px,color:#000
+        style TE1 fill:#ffebee,stroke:#c62828,stroke-width:2px,color:#000
+        style Wrong fill:#fff,stroke:#c62828,stroke-width:2px
+    end
+    subgraph Right ["✅ The Right Way: Recording-Level Split (Safe)"]
+        direction TB
+        RB["Recording B: 'Brazil Santos'"] --> B1[Chunk B1] & B2[Chunk B2]
+        RC["Recording C: 'Costa Rica'"] --> C1[Chunk C1] & C2[Chunk C2]
+        B1 & B2 --> TR2[Train Set]
+        C1 & C2 --> TE2[Test Set]
+        style TR2 fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000
+        style TE2 fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000
+        style Right fill:#fff,stroke:#2e7d32,stroke-width:2px
+    end
+```
+
+I knew this trap from prior literature search and designed the new pipeline around it from the start. `dataset_splitter.py` never touches individual chunks — it groups them by source recording first, then assigns whole recordings to a split. The grouping is derived directly from the chunk filename:
+
+```python
+# src/coffee_first_crack/data_prep/dataset_splitter.py
+def extract_recording_stem(chunk_filename: str) -> str:
+    """Extract the source recording stem from a chunk filename.
+    
+    e.g. 'roast-1-costarica-hermosa-hp-a_w0530.0.wav' -> 'roast-1-costarica-hermosa-hp-a'
+    """
+    stem = Path(chunk_filename).stem
+    match = re.match(r"^(.+)_w\d+\.\d+$", stem)
+    if match:
+        return match.group(1)
+    return stem
+```
+
+Once recordings are grouped, a stratified split assigns them 70/15/15 — stratified by whether each recording contains any first crack chunks, so FC-containing recordings are distributed across all three sets rather than clustering in one. The result is 15 recordings split 9/3/3, producing 587/195/191 chunks. Every chunk in the 191-sample test set comes from a recording the model had never encountered in any form during training.
+
