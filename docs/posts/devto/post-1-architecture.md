@@ -9,7 +9,7 @@ cover_image: ../assets/screenshots/cover-post-1.jpg
 
 This is a live [Gradio Space](https://huggingface.co/spaces/syamaner/coffee-first-crack-detection) classifying coffee roasting audio in real time. The model behind it — an Audio Spectrogram Transformer fine-tuned on the first public audio dataset for coffee roasting, which I built from scratch — hits **97.4% test accuracy** and **100% precision** on first crack detection. It runs on a Raspberry Pi 5 at 2.09 seconds per 10-second window. The full pipeline — data preparation, training, evaluation, ONNX export, edge validation, and a Gradio UI — shipped in two evenings.
 
-I didn't hit the single weekend timeline by brute-forcing the codebase myself. I acted strictly as the engineering lead, while Warp and its AI agent, Oz, handled the implementation from inside my terminal. My responsibilities were entirely architectural:
+I didn't build this by brute-forcing the codebase myself. I acted strictly as the engineering lead, while Warp and its AI agent, Oz, handled the implementation from inside my terminal. My responsibilities were entirely architectural:
 
 - **Designing the workflow:** Setting the strict rules of engagement between the agent and the codebase.
 - **Defining the science:** Dictating the specs, testing strategy, evaluation metrics, and dataset annotation approach.
@@ -38,7 +38,7 @@ This series covers the production rebuild. We took the same domain problem but b
 
 ## The Director/Coder Dynamic
 
-The core pattern that made this two-evening sprint possible was a strict, enforced separation of concerns between three actors:
+The core pattern was a strict, enforced separation of concerns between three actors:
 
 **I (the human) owned:**
 - **The Architecture:** Defining repository structure, module boundaries, and enforcing Hugging Face's `save_pretrained`/`from_pretrained` as the standard packaging contract.
@@ -60,7 +60,7 @@ This three-way split wasn't a gentleman's agreement—it was hardcoded into the 
 
 ## The Agentic Setup: AGENTS.md, Epics, and Skills
 
-Three files controlled the entire project. If you take one thing away from this post, steal this pattern.
+Three files controlled the entire project.
 
 ### 1. `AGENTS.md` — The Rulebook
 
@@ -104,7 +104,7 @@ After completing a story:
 5. Open a PR referencing the story issue
 ```
 
-This is how 18 stories were delivered across a single weekend without losing track of what was done, what was next, or what had changed. The agent maintained its own project state.
+This is how 18 stories were delivered without losing track of what was done, what was next, or what had changed. The agent maintained its own project state.
 
 Here is Oz running the full data preparation pipeline — chunking 973 audio segments, performing the recording-level split, and then invoking the `/train-model` skill:
 
@@ -125,11 +125,11 @@ Here is Oz chaining the `/export-onnx` and `/push-to-hub` skills to export the m
 
 ![Oz chaining export-onnx and push-to-hub skills](../assets/screenshots/oz-export-push-skills.png)
 
-### Steal This: A Generalised AGENTS.md Template
+### A Generalised AGENTS.md Template
 
 Here is a stripped-down version you can drop into any project. Replace the placeholders with your domain-specific rules.
 
-**The key insight:** This file is not documentation for humans. It is a **system prompt for your codebase**. Every rule you omit is a decision the agent will make on its own—and it will make it differently every time.
+This file is not documentation for humans. It is a **system prompt for your codebase**. Every rule you omit is a decision the agent will make on its own—and it will make it differently every time.
 
 ```markdown
 # AGENTS.md — [Project Name]
