@@ -91,7 +91,7 @@ Here is Oz executing the full pipeline — Label Studio conversion, chunking all
 
 ## Data Leakage
 
-Audio ML has a specific leakage trap that doesn't exist in the same way for tabular or image data. A recording's acoustic fingerprint is constant throughout — the background drum hum, the extractor hood (home roasting), noise form outside (street), the room resonance, the mic's frequency response. A model trained on chunks from `roast-1` and evaluated on other chunks from `roast-1` isn't generalising. It is recognising the session.
+Audio ML has a specific leakage trap that doesn't exist in the same way for tabular or image data. A recording's acoustic fingerprint is constant throughout — the background drum hum, the extractor hood (home roasting), noise from outside (street), the room resonance, the mic's frequency response. A model trained on chunks from `roast-1` and evaluated on other chunks from `roast-1` isn't generalising. It is recognising the session.
 
 The old prototype had exactly this problem. Its train/test split was done at the chunk level:
 
@@ -207,3 +207,48 @@ All four engineering decisions described in this post — the annotation redesig
 
 [Post 3](<!-- TODO: link -->) covers the training story: two hyperparameter attempts, the oscillating loss from a learning rate that was too aggressive for 587 samples, and the diagnosis that got from **87.5% to 100% precision**.
 
+---
+
+## References
+
+#### 1. Data Leakage in Time-Series & Audio ML
+
+The "chunk-level vs. recording-level" split is one of the most common pitfalls in time-series ML. Here is the literature that backs up this architectural decisions
+
+- **[Time Series Nested Cross-Validation (Scikit-Learn)](https://scikit-learn.org/stable/modules/cross_validation.html#cross-validation-of-time-series-data)**
+
+> Time series data is characterized by the correlation between observations that are near in time (autocorrelation). However, classical cross-validation techniques such as KFold and ShuffleSplit assume the samples are independent and identically distributed, and would result in unreasonable correlation between training and testing instances (yielding poor estimates of generalization error) on time series data.
+
+- **[Data Leakage in Machine Learning (Kaggle Guide)](https://www.kaggle.com/code/alexisbcook/data-leakage)**
+
+> After all, you incorporated data from the validation or test data into how you make predictions, so the may do well on that particular data even if it can't generalize to new data. This problem becomes even more subtle (and more dangerous) when you do more complex feature engineering.
+
+
+#### 2. Handling Class Imbalance (The PyTorch & HF Way)
+
+The `WeightedLossTrainer` approach is the mathematically correct way to handle a 20/80 split without synthetic augmentation
+
+- **[PyTorch `nn.CrossEntropyLoss` Documentation](https://pytorch.org/docs/stable/generated/torch.nn.CrossEntropyLoss.html)**
+
+> It is useful when training a classification problem with C classes. If provided, the optional argument weight should be a 1D Tensor assigning weight to each of the classes. This is particularly useful when you have an unbalanced training set.
+
+- **[Hugging Face Trainer Customization Guide](https://huggingface.co/docs/transformers/main_classes/trainer#subclassing-trainer)** 
+
+> Subclass Trainer methods to change training behavior without rewriting the entire loop. Subclassing modifies the training loop, for example the forward pass or loss computation.
+
+### 3. Audio Annotation & Label Studio
+
+- **[Label Studio Audio Annotation Guide](https://labelstud.io/guide/audio)**
+- **[Google's AudioSet Ontology](https://research.google.com/audioset/ontology/index.html)**
+
+### 4. Hardware Realities: Condenser vs. Dynamic Mics
+
+The 27.4-second delay on the test set was caused by switching from the FIFINE (Condenser) to the Audio-Technica (Dynamic). 
+
+- **[Dynamic vs. Condenser Mics (Shure Insights)](https://www.shure.com/en-US/insights/dynamic-vs-condenser-mics-toms)** 
+
+While framed around recording drum hits, the guide explains why dynamic mics have lower sensitivity and a "less present attack" compared to condensers—which directly translates to the model missing the earliest, quietest pops of coffee roasting.
+
+
+### 5. Hugging Face Audio Ecosystem
+- **[Hugging Face Audio Course (Chapter 5: Building an Audio Dataset)](https://huggingface.co/learn/audio-course/chapter5/introduction)**
