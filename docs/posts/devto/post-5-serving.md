@@ -4,7 +4,7 @@ published: false
 description: "A model that only runs on your laptop is a prototype. Publishing the first public coffee roasting audio dataset, discovering the HF inference widget wall, building a Gradio Space, and debugging four container failures by pasting HF logs to Oz and getting fixes back in seconds."
 tags: machinelearning, python, huggingface, gradio
 series: "From Prototype to Production in a Weekend"
-cover_image:
+cover_image: ../assets/screenshots/post-5-cover.jpg
 ---
 
 [Post 4](<!-- TODO: link -->) ended with a Raspberry Pi 5 benchmarked at 2.07 seconds per window, stable at 45°C with the official PSU and active cooler. The hardware story was done. But a model that lives in `experiments/baseline_v2/checkpoint-best` on a personal laptop is not a community contribution. It is a local artefact.
