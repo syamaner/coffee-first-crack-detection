@@ -56,10 +56,10 @@ An Audio Spectrogram Transformer (AST) fine-tuned to detect **first crack** — 
 
 > **Source code & training**: [github.com/syamaner/coffee-first-crack-detection](https://github.com/syamaner/coffee-first-crack-detection)
 >
-> **Read about the original fully working end-to-end prototype — inference, two MCP servers and an N8N agent:**
-> - **Part 1** — [Training a Neural Network to Detect Coffee First Crack from Audio](https://dev.to/syamaner/part-1-training-a-neural-network-to-detect-coffee-first-crack-from-audio-an-agentic-development-1jei)
-> - **Part 2** — [Building MCP Servers to Control a Home Coffee Roaster](https://dev.to/syamaner/part-2-building-mcp-servers-to-control-a-home-coffee-roaster-an-agentic-development-journey-with-58ik)
-> - **Part 3** — [From Neural Networks to Autonomous Coffee Roasting: Orchestrating MCP Servers](https://dev.to/syamaner/part-3-from-neural-networks-to-autonomous-coffee-roasting-orchestrating-mcp-servers-with-net-58pd)
+> **Original prototype series (the earlier end-to-end build that led to this rewrite):**
+> - Part 1 — [Training a Neural Network to Detect Coffee First Crack from Audio](https://dev.to/syamaner/part-1-training-a-neural-network-to-detect-coffee-first-crack-from-audio-an-agentic-development-1jei)
+> - Part 2 — [Building MCP Servers to Control a Home Coffee Roaster](https://dev.to/syamaner/part-2-building-mcp-servers-to-control-a-home-coffee-roaster-an-agentic-development-journey-with-58ik)
+> - Part 3 — [From Neural Networks to Autonomous Coffee Roasting: Orchestrating MCP Servers](https://dev.to/syamaner/part-3-from-neural-networks-to-autonomous-coffee-roasting-orchestrating-mcp-servers-with-net-58pd)
 
 ---
 
