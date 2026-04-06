@@ -1,7 +1,7 @@
 ---
 title: "Part 1: The Architecture & The Agent — Building a Production ML Pipeline with Warp/Oz"
 published: false
-description: "How I shipped a Hugging Face-native audio classification pipeline — from scaffold to RPi5 edge deployment — in 25 hours using spec-driven agentic development."
+description: "How I shipped a Hugging Face-native audio classification pipeline — from scaffold to RPi5 edge deployment — in two evenings using spec-driven agentic development."
 tags: machinelearning, python, ai, audio
 series: "From Prototype to Production in a Weekend"
 cover_image: ../assets/screenshots/cover-post-1.jpg
@@ -15,7 +15,7 @@ I didn't hit the single weekend timeline by brute-forcing the codebase myself. I
 - **Defining the science:** Dictating the specs, testing strategy, evaluation metrics, and dataset annotation approach.
 - **Directing the execution:** Guiding the agent through the implementation and reviewing the output.
 
-Operating this way over the weekend, Warp/Oz executed an 18-story epic across 10 pull requests. That resulted in 11,107 lines of Python across 75 files, with 52 of those commits explicitly co-authored by the agent. Copilot reviewed every PR, flagging 111 individual issues across 28 review batches. The model is [published on Hugging Face](https://huggingface.co/syamaner/coffee-first-crack-detection), the dataset is [open-sourced](https://huggingface.co/datasets/syamaner/coffee-first-crack-audio), and the source is on [GitHub](https://github.com/syamaner/coffee-first-crack-detection).
+Operating this way over the weekend, Warp/Oz executed an 18-story epic across 10 pull requests. That resulted in 11,087 lines of Python across 75 files, with 52 of those commits explicitly co-authored by the agent. Copilot reviewed every PR, flagging 111 individual issues across 28 review batches. The model is [published on Hugging Face](https://huggingface.co/syamaner/coffee-first-crack-detection), the dataset is [open-sourced](https://huggingface.co/datasets/syamaner/coffee-first-crack-audio), and the source is on [GitHub](https://github.com/syamaner/coffee-first-crack-detection).
 
 This post is about the system that made that possible — not the model itself. The ML science comes in Posts 2 and 3. Here, I want to show the exact architecture I used to direct an AI agent through a complex, multi-phase ML project without losing control of the engineering decisions that matter.
 
@@ -38,7 +38,7 @@ This series covers the production rebuild. We took the same domain problem but b
 
 ## The Director/Coder Dynamic
 
-The core pattern that made this 25-hour sprint possible was a strict, enforced separation of concerns between three actors:
+The core pattern that made this two-evening sprint possible was a strict, enforced separation of concerns between three actors:
 
 **I (the human) owned:**
 - **The Architecture:** Defining repository structure, module boundaries, and enforcing Hugging Face's `save_pretrained`/`from_pretrained` as the standard packaging contract.
@@ -228,12 +228,12 @@ This is not a criticism of Copilot. It is doing exactly what it should: catching
 
 | Metric | Result |
 |---|---|
-| **Wall-clock time** | ~25 hours (Fri 22:37 → Sat 23:30) |
+| **Wall-clock time** | Two evenings (Fri 22:37 → Sat 23:36) |
 | **Stories completed** | 18 across 6 phases |
 | **Pull requests** | 10 merged |
 | **Total commits** | ~65 (55 non-merge) |
 | **Oz co-authored** | 52 commits |
-| **Lines of code** | 11,107 insertions across 75 files |
+| **Lines of code** | 11,087 insertions across 75 files |
 | **Copilot reviews** | 28 batches, 111 individual comments |
 | **Model accuracy** | 97.4% test / 100% precision |
 | **Edge latency** | 2.09s per 10s window (RPi5, INT8, 4 threads) |

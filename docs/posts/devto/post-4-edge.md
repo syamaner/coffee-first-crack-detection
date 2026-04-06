@@ -11,7 +11,7 @@ cover_image: ../assets/screenshots/post-4-cover.jpg
 
 The naive path works. Export the PyTorch checkpoint to ONNX FP32, copy the 345MB file across to the Pi, run inference. The first benchmark returned **9.4 seconds per 10-second audio window**. Not a misconfiguration. That is what an 86M parameter transformer costs on a single ARM Cortex-A76 core at full floating-point precision.
 
-Getting to **2.07 seconds** (4 threads, active cooler) required INT8 dynamic quantisation via `onnxruntime.quantization`, explicit thread-limiting to prevent under-voltage crashes, a PSU swap from a standard USB-C charger to the official Raspberry Pi 27W supply, and a debugging session from inside Warp where Oz ran `vcgencmd get_throttled` over SSH and the hex flag came back `0x50000`.
+Getting to **2.09 seconds** (4 threads, active cooler) required INT8 dynamic quantisation via `onnxruntime.quantization`, explicit thread-limiting to prevent under-voltage crashes, a PSU swap from a standard USB-C charger to the official Raspberry Pi 27W supply, and a debugging session from inside Warp where Oz ran `vcgencmd get_throttled` over SSH and the hex flag came back `0x50000`.
 
 ## What We're Deploying
 
@@ -46,7 +46,7 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 Here is the evaluation session — Oz running `evaluate_onnx.py` over SSH on the Pi, 4 threads, reading the latency numbers as they arrive:
 
-{% embed https://app.warp.dev/block/Vq2LYJUmuSPJfRsLd3aLRt }
+{% embed https://app.warp.dev/block/Vq2LYJUmuSPJfRsLd3aLRt %}
 
 PR #23 accumulated **36 Copilot comments across 6 review rounds** — the most reviewed PR in the project. The pattern was consistent with the rest of the series: type annotations, missing error handlers, edge-case validation. Copilot flagged a missing `FileNotFoundError` when the ONNX path doesn't exist and a missing explicit `n_samples` type on the evaluation report. It did not flag the benchmark script's `<500ms` target line — that constraint is Mac-centric, and on the Pi it will always print `⚠️ FAIL` regardless of whether the latency is acceptable for the actual use case. The sliding inference window is 10 seconds with a 3-second hop; a 2-second inference time is perfectly adequate for real-time roasting detection, regardless of what the script reports.
 
@@ -203,7 +203,7 @@ For this use case, that is sufficient. First crack is not a millisecond-precisio
 
 The harder observation is what these numbers say about transformers at the edge more generally. An 86M parameter model that takes 9.4 seconds at FP32 on a $60 ARM board is not a general-purpose edge architecture. It works here because the inference cadence is slow and the event it detects lasts long enough to be caught across multiple windows. Deploy the same model against a task requiring sub-second response and you would need a much smaller architecture or dedicated inference hardware. INT8 quantisation helped — 3.84× size reduction, 4.5× latency improvement over FP32 — but it does not turn a large transformer into a microcontroller-class model.
 
-[Post 5](<!-- TODO: link -->) covers the other half of making the model usable: getting it in front of people who are not running SSH sessions into a Raspberry Pi. Publishing the model card and dataset card, building a Gradio Space that works inside a container, and the four platform bugs — including an SSR/asyncio crash on Python 3.13 — that Oz debugged by reading live container logs from inside the same terminal.
+[Post 5](<!-- TODO: link -->) covers the other half of making the model usable: getting it in front of people who are not running SSH sessions into a Raspberry Pi. Publishing the model card and dataset card, building a Gradio Space that works inside a container, and the four platform bugs — including an SSR/asyncio crash on Python 3.13 — each diagnosed by pasting HF Space logs to Oz and getting fixes back in seconds.
 
 ---
 
