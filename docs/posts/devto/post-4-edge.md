@@ -28,7 +28,7 @@ The numbers relevant to this post:
 
 The Pi validation for [PR #23](https://github.com/syamaner/coffee-first-crack-detection/pull/23) followed a specific division of labour. The ONNX models were exported on the Mac and synced across to the Pi. Oz then SSH'd into the device from within the Warp terminal and drove the benchmark and evaluation scripts directly. My role was to observe the results and make decisions about hardware configuration; the agent's role was to type.
 
-The value of this only becomes clear when you mentally play out the alternative. With a browser-based assistant, the loop is: copy the terminal output → paste into chat → read the suggestion → switch back → run the command. With Oz in Warp, the SSH session, the benchmark run, and the result analysis are all one continuous thread. The `evaluate_onnx.py` run would finish, the latency numbers appear, and the next command is already being composed before the output has finished scrolling.
+Because Oz runs inside the terminal, the SSH session, benchmark output, and result analysis stayed in one continuous thread. The `evaluate_onnx.py` run finished, the latency numbers appeared, and the next command was composed directly from the same context.
 
 Two scripts drove everything on the Pi:
 
@@ -193,7 +193,7 @@ The final hardware requirements from that debugging session are encoded in `AGEN
 - **Threads**: Default 2 via `--threads` flag; 4 threads needs 27W PSU + active cooler
 ```
 
-The context-switching cost of this entire debugging session was near zero. Oz, the SSH session, the `vcgencmd` output, and the subsequent `AGENTS.md` update all lived inside one Warp terminal. The usual loop — crash → screenshot → paste into a browser tab → wait for a reply → SSH back in — did not happen.
+The entire debugging session — SSH, `vcgencmd` output, and the subsequent `AGENTS.md` update — stayed inside one Warp terminal session.
 
 ## The Verdict
 
