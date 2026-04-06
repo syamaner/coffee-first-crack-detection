@@ -4,7 +4,7 @@ published: false
 description: "Taking a 345MB Audio Spectrogram Transformer off the development machine and onto a $60 ARM board — ONNX export, INT8 quantisation, threshold sweeping, and the hardware debugging that required a PSU swap and a hex flag from vcgencmd."
 tags: edgecomputing, python, machinelearning, raspberrypi
 series: "From Prototype to Production in a Weekend"
-cover_image: ../assets/screenshots/post-4-cover.jpg
+cover_image:
 ---
 
 [Post 3](<!-- TODO: link -->) ended with three numbers: 97.4% test accuracy, 100% precision, 0 false positives. All of it measured on a MacBook. This post covers taking that model to the hardware it is actually meant to run on — a Raspberry Pi 5, listening to a home roaster over a USB microphone during a live roast.
@@ -46,7 +46,7 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 Here is the evaluation session — Oz running `evaluate_onnx.py` over SSH on the Pi, 4 threads, reading the latency numbers as they arrive:
 
-{% embed https://app.warp.dev/block/Vq2LYJUmuSPJfRsLd3aLRt }
+<!-- TODO: Warp Block — SSH evaluation session on RPi5, 4-thread INT8 run -->
 
 PR #23 accumulated **36 Copilot comments across 6 review rounds** — the most reviewed PR in the project. The pattern was consistent with the rest of the series: type annotations, missing error handlers, edge-case validation. Copilot flagged a missing `FileNotFoundError` when the ONNX path doesn't exist and a missing explicit `n_samples` type on the evaluation report. It did not flag the benchmark script's `<500ms` target line — that constraint is Mac-centric, and on the Pi it will always print `⚠️ FAIL` regardless of whether the latency is acceptable for the actual use case. The sliding inference window is 10 seconds with a 3-second hop; a 2-second inference time is perfectly adequate for real-time roasting detection, regardless of what the script reports.
 
@@ -167,7 +167,7 @@ Gemini was brought in to cross-reference the RPi5 throttle register documentatio
 
 Here is the SSH debugging session — Oz reading `vcgencmd get_throttled`, diagnosing the `0x50000` flag, and adjusting threads as an interim workaround while the hardware decision was made:
 
-![Oz SSH'd into the RPi5, running vcgencmd get_throttled and diagnosing the 0x50000 under-voltage flag](../assets/screenshots/post-4-vcgencmd.png)
+<!-- TODO: Warp Block — vcgencmd debugging session, 0x50000 flag -->
 
 **After the PSU swap**, 4-thread inference ran without crashes. But a second flag appeared under sustained load:
 
@@ -175,10 +175,6 @@ Here is the SSH debugging session — Oz reading `vcgencmd get_throttled`, diagn
 $ vcgencmd get_throttled
 throttled=0xe0000
 ```
-
-![Oz SSH'd into the RPi5, after PSU swap + cooling](../assets/screenshots/post-4-psu-chage.png)
-
-
 
 `0xe0000` sets bits 17, 18, and 19 — **ARM frequency capped**, **throttling has occurred**, **soft temperature limit active**. The CPU core temperature hit 77°C under continuous inference. The Pi5 has no heatsink by default; sustained transformer inference is a thermal stress test the passive design cannot pass.
 
