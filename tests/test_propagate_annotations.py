@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-import scripts.propagate_annotations as pa  # noqa: E402 (scripts/ not a package)
+import scripts.propagate_annotations as pa
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers

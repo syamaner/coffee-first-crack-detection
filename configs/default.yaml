@@ -77,7 +77,10 @@ pi_inference:
 recording:
   # macOS CoreAudio Aggregate Device name (set in Audio MIDI Setup)
   device: RoastMics
-  # Capture sample rate — must match Aggregate Device setting in Audio MIDI Setup
+  # Capture sample rate in Hz. Does NOT need to match the Aggregate Device's
+  # native rate — CoreAudio performs sample rate conversion automatically.
+  # 44100 is standard for this pipeline; librosa resamples to 16 kHz for AST.
+  # Set to 48000 to record at the device native rate and avoid CoreAudio SRC.
   sample_rate: 44100
   # Human-readable labels for each mic number (used in session JSON and startup banner)
   # mic N = Aggregate Device input channel N-1

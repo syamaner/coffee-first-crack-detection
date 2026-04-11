@@ -136,6 +136,12 @@ EOF
 Target: peaks between **−12 dBFS and −6 dBFS** during roast events.
 If peak = 1.000 on non-knock audio, reduce the FIFINE physical knob by ~20%.
 
+**Memory usage:** the recorder buffers all audio in RAM until Ctrl-C, then writes.
+At 44100 Hz, 2 channels, float32, a 20-minute session uses ~420 MB.
+This is intentional for the target hardware (M3 Max, 128 GB RAM) and keeps the code
+simple. It also means that if a write fails at the end, all captured audio is still
+in RAM. Do not use on memory-constrained hardware for sessions longer than ~1 hour.
+
 ---
 
 ## Annotation Workflow (Paired Recordings)

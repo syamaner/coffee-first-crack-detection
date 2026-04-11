@@ -133,6 +133,16 @@ def cmd_record(args: argparse.Namespace) -> None:
     )
     mics: list[int] = args.mics
 
+    # Validate mic numbers: must be >= 1 and unique
+    invalid = [m for m in mics if m < 1]
+    if invalid:
+        print(f"Error: mic numbers must be >= 1, got: {invalid}")
+        sys.exit(1)
+    if len(mics) != len(set(mics)):
+        dupes = sorted({m for m in mics if mics.count(m) > 1})
+        print(f"Error: duplicate mic numbers not allowed: {dupes}")
+        sys.exit(1)
+
     # Labels: CLI → config → "mic{n}"
     if args.labels and len(args.labels) != len(mics):
         print(f"Error: --labels has {len(args.labels)} value(s) but --mics has {len(mics)} mic(s).")
@@ -155,12 +165,18 @@ def cmd_record(args: argparse.Namespace) -> None:
     output_dir: Path = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    candidate_wavs = [output_dir / f"mic{m}-{args.origin}-roast{args.roast_num}.wav" for m in mics]
-    candidate_session = output_dir / f"{args.origin}-roast{args.roast_num}-session.json"
-
-    for path in [*candidate_wavs, candidate_session]:
-        if path.exists():
-            print(f"Error: {path.name} already exists. Remove it or use a different --roast-num.")
+    # Check both normal and _partial candidates — we don't know the session
+    # duration yet, so a re-run could silently overwrite a prior partial session.
+    base = f"{args.origin}-roast{args.roast_num}"
+    for sfx in ("", "_partial"):
+        for m in mics:
+            p = output_dir / f"mic{m}-{base}{sfx}.wav"
+            if p.exists():
+                print(f"Error: {p.name} already exists. Remove it or use a different --roast-num.")
+                sys.exit(1)
+        p = output_dir / f"{base}-session{sfx}.json"
+        if p.exists():
+            print(f"Error: {p.name} already exists. Remove it or use a different --roast-num.")
             sys.exit(1)
 
     # Validate device — mic N uses Aggregate Device channel N-1, so open max(mics) channels
