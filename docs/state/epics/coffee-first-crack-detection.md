@@ -1,7 +1,7 @@
 # Epic: Coffee First Crack Detection — HuggingFace Model Repository
 
 **GitHub Issue**: [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1)
-**Status**: 🔄 Active — Phase 7 in progress (S19 open)
+**Status**: 🔄 Active — Phase 7 complete (S19 + S20 delivered); recording data collection in progress
 **Last Updated**: 2026-04-11
 
 ## Objective
@@ -84,23 +84,38 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
   - `spaces/` directory committed to git for version control
 
 ### Phase 7 — Data Collection Infrastructure
-- [ ] S19 [#46](https://github.com/syamaner/coffee-first-crack-detection/issues/46): Multi-mic synchronized recording tool for dataset expansion
-  - macOS CoreAudio Aggregate Device (`RoastMics`), 1–N mic support
-  - `scripts/record_mics.py` — list-devices + record subcommands
-  - `configs/default.yaml` — `recording.mic_labels` section
-  - `docs/multi_mic_setup.md` — setup guide + annotation workflow
-  - Fixes 27.4s mic-2 detection delay by growing both mic splits at 1:1 per roast
-- [ ] S20 [#47](https://github.com/syamaner/coffee-first-crack-detection/issues/47): Annotation propagation for paired multi-mic recordings
-  - `scripts/propagate_annotations.py` — copies primary mic annotation JSON to all paired mics
-  - Reads `*-session.json` from `record_mics.py`; slots between `convert_labelstudio_export.py` and `chunk_audio.py`
-  - Zero changes to existing pipeline scripts; backward compatible with all 15 current recordings
+- [x] S19 [#46](https://github.com/syamaner/coffee-first-crack-detection/issues/46): Multi-mic synchronized recording tool for dataset expansion ✅
+  - macOS CoreAudio Aggregate Device (`RoastMics`), 1–N mic support via `--mics` list
+  - `scripts/record_mics.py` — `list-devices` + `record` subcommands; labels from `configs/default.yaml`
+  - `configs/default.yaml` — `recording` section (device, sample_rate, mic_labels)
+  - `docs/multi_mic_setup.md` — full hardware setup guide + calibrated gain settings (2026-04-11)
+  - MCP server `find_usb_microphone()` patched to prefer `RoastMics` aggregate (coffee-roasting repo)
+  - First real roasts captured: `panama-hortigal-estate-roast1` (12.8 min), `roast2` (15.1 min)
+- [x] S20 [#47](https://github.com/syamaner/coffee-first-crack-detection/issues/47): Annotation propagation for paired multi-mic recordings ✅
+  - `scripts/propagate_annotations.py` — reads `*-session.json`, propagates primary mic annotation to all paired mics
+  - Uses `mic['file']` from session JSON — handles `_partial` suffix and future naming variants
+  - Slots between `convert_labelstudio_export.py` and `chunk_audio.py`; zero pipeline changes
+  - 16 tests; Copilot review comments addressed (PR #48)
 
 ---
 
 ## Active Context
 
-**Phase 7 started.** S19 (#46) opened: dual-mic recording tool spec agreed.
-18 stories complete across Phases 1–6; S19 is the first story in Phase 7.
+**Phase 7 complete.** S19 (#46) + S20 (#47) delivered. PR #48 open on `feature/46-multi-mic-recorder`.
+
+**S19 — Multi-mic recording** (`scripts/record_mics.py`):
+- `RoastMics` CoreAudio Aggregate Device: FIFINE K669B (ch 0, Primary Clock) + ATR2100x (ch 1, Drift Correction)
+- Calibrated gain: FIFINE 25.5 dB software + ~60% physical knob; ATR2100x Front Left/Right 18.38/18.75 dB
+- Indefinite recording, Ctrl-C stop, `_partial` suffix for sessions < 60s
+- Session JSON captures hardware labels, gains, duration, ISO timestamp
+- First real paired roasts: `panama-hortigal-estate-roast1` (12.8 min), `roast2` (15.1 min) — pending annotation
+- MCP conflict resolved: `find_usb_microphone()` now prefers `RoastMics` over raw FIFINE
+
+**S20 — Annotation propagation** (`scripts/propagate_annotations.py`):
+- Reads `*-session.json` → copies primary mic annotation JSON to all paired mics
+- `--dry-run`, `--overwrite`, `--primary-mic` flags
+- Uses `mic['file']` from session JSON for all filename resolution (handles `_partial` suffix)
+- 16 tests, ruff + pyright clean, Copilot review comments addressed
 
 **Gradio Space** (S18 / #25): https://huggingface.co/spaces/syamaner/coffee-first-crack-detection
 - Dropdown: "First crack (10s)" / "No first crack (10s)" pre-loaded examples
