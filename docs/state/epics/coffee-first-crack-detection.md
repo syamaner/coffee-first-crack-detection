@@ -92,6 +92,11 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
   - MCP server `find_usb_microphone()` patched to prefer `RoastMics` aggregate (coffee-roasting repo)
   - First real roasts captured: `panama-hortigal-estate-roast1` (12.8 min), `roast2` (15.1 min)
 - [x] S20 [#47](https://github.com/syamaner/coffee-first-crack-detection/issues/47): Annotation propagation for paired multi-mic recordings ✅
+- [ ] S21 [#49](https://github.com/syamaner/coffee-first-crack-detection/issues/49): Streaming disk writes + post-recording verification for record_mics.py
+  - Replace in-memory buffer with producer-consumer queue → soundfile.SoundFile writer thread
+  - SIGTERM handler for clean shutdown; crash-safe for soft kills
+  - Temp `_recording` filenames renamed to final/partial on stop
+  - `--verify` flag: peak/RMS/dBFS per mic, sample-lock check, balance check, session JSON validation
   - `scripts/propagate_annotations.py` — reads `*-session.json`, propagates primary mic annotation to all paired mics
   - Uses `mic['file']` from session JSON — handles `_partial` suffix and future naming variants
   - Slots between `convert_labelstudio_export.py` and `chunk_audio.py`; zero pipeline changes
