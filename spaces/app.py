@@ -7,11 +7,32 @@ the transformers audio-classification pipeline.
 
 from __future__ import annotations
 
-import os
+import asyncio.base_events as _base_events
 
-# Disable Gradio SSR before import — prevents Python 3.13 asyncio
-# BaseEventLoop.__del__ ValueError on garbage-collected event loops.
-os.environ.setdefault("GRADIO_SSR_MODE", "false")
+
+def _patch_asyncio_event_loop_del() -> None:
+    """Suppress harmless ValueError during event loop GC.
+
+    Gradio 6.x creates intermediate asyncio event loops during startup.
+    When these are garbage-collected, ``BaseEventLoop.__del__`` tries to
+    close an already-invalid file descriptor (-1), producing noisy but
+    benign tracebacks in container logs.  This patch silences them.
+    """
+    original_del = getattr(_base_events.BaseEventLoop, "__del__", None)
+    if original_del is None:
+        return
+
+    def _patched_del(self):  # type: ignore[no-untyped-def]
+        try:
+            original_del(self)
+        except ValueError as exc:
+            if "Invalid file descriptor" not in str(exc):
+                raise
+
+    _base_events.BaseEventLoop.__del__ = _patched_del  # type: ignore[attr-defined]
+
+
+_patch_asyncio_event_loop_del()
 
 import gradio as gr
 from huggingface_hub import hf_hub_download

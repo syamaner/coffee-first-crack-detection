@@ -1,8 +1,8 @@
 # Epic: Coffee First Crack Detection — HuggingFace Model Repository
 
 **GitHub Issue**: [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1)
-**Status**: ✅ Complete — all 18 stories done, epic closed
-**Last Updated**: 2026-04-04
+**Status**: 🔄 Active — Phase 7 in progress (S19 open)
+**Last Updated**: 2026-04-11
 
 ## Objective
 Create a standalone, HuggingFace-publishable repository for training, evaluating, and publishing the coffee first crack audio detection model. Extracted from the `coffee-roasting` monorepo. Targets M3+ Mac (MPS), RTX 4090 (CUDA), and Raspberry Pi 5 (ONNX/CPU).
@@ -83,11 +83,24 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
   - Space linked to model card via `models:` field — appears in "Spaces using this model"
   - `spaces/` directory committed to git for version control
 
+### Phase 7 — Data Collection Infrastructure
+- [ ] S19 [#46](https://github.com/syamaner/coffee-first-crack-detection/issues/46): Multi-mic synchronized recording tool for dataset expansion
+  - macOS CoreAudio Aggregate Device (`RoastMics`), 1–N mic support
+  - `scripts/record_mics.py` — list-devices + record subcommands
+  - `configs/default.yaml` — `recording.mic_labels` section
+  - `docs/multi_mic_setup.md` — setup guide + annotation workflow
+  - Fixes 27.4s mic-2 detection delay by growing both mic splits at 1:1 per roast
+- [ ] S20 [#47](https://github.com/syamaner/coffee-first-crack-detection/issues/47): Annotation propagation for paired multi-mic recordings
+  - `scripts/propagate_annotations.py` — copies primary mic annotation JSON to all paired mics
+  - Reads `*-session.json` from `record_mics.py`; slots between `convert_labelstudio_export.py` and `chunk_audio.py`
+  - Zero changes to existing pipeline scripts; backward compatible with all 15 current recordings
+
 ---
 
 ## Active Context
 
-**Epic complete.** All 18 stories delivered across 6 phases. Issues #24, #25, #26 closed. Epic issue #1 fully checked off.
+**Phase 7 started.** S19 (#46) opened: dual-mic recording tool spec agreed.
+18 stories complete across Phases 1–6; S19 is the first story in Phase 7.
 
 **Gradio Space** (S18 / #25): https://huggingface.co/spaces/syamaner/coffee-first-crack-detection
 - Dropdown: "First crack (10s)" / "No first crack (10s)" pre-loaded examples

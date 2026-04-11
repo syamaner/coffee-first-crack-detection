@@ -4,7 +4,7 @@
 
 | Epic | GitHub Issue | Status | Phase |
 |------|-------------|--------|-------|
-| Coffee First Crack Detection — HuggingFace Model Repository | [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1) | ✅ Complete | All 18 stories done, epic closed |
+| Coffee First Crack Detection — HuggingFace Model Repository | [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1) | 🔄 Active | Phase 7 — S19 (#46) open: dual-mic recording tool |
 
 ## Links
 - GitHub Repo: https://github.com/syamaner/coffee-first-crack-detection
