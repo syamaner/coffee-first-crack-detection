@@ -232,13 +232,16 @@ def cmd_record(args: argparse.Namespace) -> None:
         return
 
     recording = np.concatenate(chunks, axis=0)
+    # Use actual sample count for duration — wall-clock time includes PortAudio
+    # initialisation latency (~1-2s) before the first callback fires.
+    audio_duration = len(recording) / sample_rate
 
     # Short-session guard
-    is_partial = duration < args.min_duration
+    is_partial = audio_duration < args.min_duration
     suffix = "_partial" if is_partial else ""
     if is_partial:
         print(
-            f"⚠️  Duration ({duration:.1f}s) is shorter than "
+            f"⚠️  Duration ({audio_duration:.1f}s) is shorter than "
             f"--min-duration ({args.min_duration}s) — saving with _partial suffix"
         )
 
@@ -260,7 +263,7 @@ def cmd_record(args: argparse.Namespace) -> None:
         "origin": args.origin,
         "roast_num": args.roast_num,
         "sample_rate": sample_rate,
-        "duration_sec": round(duration, 2),
+        "duration_sec": round(audio_duration, 2),
         "recorded_at": recorded_at,
         "mics": mic_meta,
     }
@@ -268,7 +271,8 @@ def cmd_record(args: argparse.Namespace) -> None:
         json.dump(session_data, f, indent=2)
         f.write("\n")
     print(f"  Wrote {session_filename}")
-    print(f"\nDone. {duration:.1f}s → {len(mics)} WAV(s) + session JSON in {output_dir}/")
+    n = len(mics)
+    print(f"\nDone. {audio_duration:.1f}s audio -> {n} WAV(s) + session JSON in {output_dir}")
 
 
 # ---------------------------------------------------------------------------

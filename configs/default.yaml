@@ -74,6 +74,17 @@ pi_inference:
   #   First crack phase lasts 2-3 minutes so 21s delay is acceptable
   #   Requires adequate PSU (5V/5A) + active cooling for stable 2-thread operation
 
+recording:
+  # macOS CoreAudio Aggregate Device name (set in Audio MIDI Setup)
+  device: RoastMics
+  # Capture sample rate — must match Aggregate Device setting in Audio MIDI Setup
+  sample_rate: 44100
+  # Human-readable labels for each mic number (used in session JSON and startup banner)
+  # mic N = Aggregate Device input channel N-1
+  mic_labels:
+    1: fifine        # FIFINE K669B USB condenser (Primary Clock, ch 0)
+    2: audiotechnica # Audio-Technica ATR2100x USB dynamic (Drift Correction, ch 1)
+
 export:
   output_dir: "exports/onnx"
   quantize_int8: true
