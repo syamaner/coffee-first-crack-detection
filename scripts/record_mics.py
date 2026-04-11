@@ -354,6 +354,7 @@ def main() -> None:
     )
     rec.add_argument(
         "--device",
+        type=lambda v: int(v) if v.isdigit() else v,
         default=None,
         help=f"Aggregate device name or index (default: config → '{_DEFAULT_DEVICE}')",
     )
