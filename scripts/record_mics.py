@@ -285,9 +285,11 @@ def cmd_record(args: argparse.Namespace) -> None:
     mic_meta: list[dict[str, Any]] = []
     for m, label, gain in zip(mics, labels, gains, strict=True):
         ch_idx = m - 1
-        audio: np.ndarray = np.clip(recording[:, ch_idx] * gain, -1.0, 1.0)
+        audio: np.ndarray = np.clip(recording[:, ch_idx] * np.float32(gain), -1.0, 1.0).astype(
+            np.float32, copy=False
+        )
         filename = f"mic{m}-{args.origin}-roast{args.roast_num}{suffix}.wav"
-        sf.write(str(output_dir / filename), audio, sample_rate)
+        sf.write(str(output_dir / filename), audio, sample_rate, subtype="FLOAT")
         print(f"  Wrote {filename}")
         mic_meta.append({"mic_num": m, "label": label, "gain": gain, "file": filename})
 
