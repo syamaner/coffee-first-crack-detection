@@ -128,7 +128,10 @@ def cmd_record(args: argparse.Namespace) -> None:
     recording_cfg = load_recording_config()
 
     # Resolve device and sample-rate (CLI overrides config, config overrides defaults)
-    device: str | int = args.device or recording_cfg.get("device", _DEFAULT_DEVICE)
+    # Use `is not None` so that index 0 (a valid device) is not treated as falsy.
+    device: str | int = (
+        args.device if args.device is not None else recording_cfg.get("device", _DEFAULT_DEVICE)
+    )
     sample_rate: int = args.sample_rate or int(
         recording_cfg.get("sample_rate", _DEFAULT_SAMPLE_RATE)
     )
@@ -143,6 +146,9 @@ def cmd_record(args: argparse.Namespace) -> None:
         sys.exit(1)
     if args.roast_num < 1:
         print(f"Error: --roast-num must be >= 1, got {args.roast_num}")
+        sys.exit(1)
+    if args.min_duration < 1:
+        print(f"Error: --min-duration must be >= 1, got {args.min_duration}")
         sys.exit(1)
 
     # Validate mic numbers: must be >= 1 and unique
