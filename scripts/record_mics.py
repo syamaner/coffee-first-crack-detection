@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import threading
 import time
@@ -132,6 +133,17 @@ def cmd_record(args: argparse.Namespace) -> None:
         recording_cfg.get("sample_rate", _DEFAULT_SAMPLE_RATE)
     )
     mics: list[int] = args.mics
+
+    # Validate origin slug matches _NEW_PATTERN in dataset.py: [a-z0-9-]+
+    if not re.fullmatch(r"[a-z0-9-]+", args.origin):
+        print(
+            f"Error: --origin '{args.origin}' must match [a-z0-9-]+ "
+            "(lowercase letters, digits, hyphens only)."
+        )
+        sys.exit(1)
+    if args.roast_num < 1:
+        print(f"Error: --roast-num must be >= 1, got {args.roast_num}")
+        sys.exit(1)
 
     # Validate mic numbers: must be >= 1 and unique
     invalid = [m for m in mics if m < 1]
@@ -243,11 +255,17 @@ def cmd_record(args: argparse.Namespace) -> None:
     duration = time.monotonic() - start
     print(f"\nStopped after {duration:.1f}s.")
 
-    if not chunks:
+    # Copy chunk list under lock to avoid a race with any in-flight callback
+    # during stream shutdown (stream.stop() is ordered, but no memory barrier
+    # without the lock).
+    with lock:
+        recorded_chunks = list(chunks)
+
+    if not recorded_chunks:
         print("No audio captured.")
         return
 
-    recording = np.concatenate(chunks, axis=0)
+    recording = np.concatenate(recorded_chunks, axis=0)
     # Use actual sample count for duration — wall-clock time includes PortAudio
     # initialisation latency (~1-2s) before the first callback fires.
     audio_duration = len(recording) / sample_rate

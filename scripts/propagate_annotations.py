@@ -277,7 +277,10 @@ def main() -> None:
 
     session_files = find_session_files(args.session_dir)
     if not session_files:
-        print(f"No session files (*-session.json) found in {args.session_dir}")
+        print(
+            f"No session files (*-session.json or *-session_partial.json) found"
+            f" in {args.session_dir}"
+        )
         return
 
     print(f"Found {len(session_files)} session(s) in {args.session_dir}")
