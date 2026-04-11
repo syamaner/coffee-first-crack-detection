@@ -85,6 +85,15 @@ class TestFindSessionFiles:
         assert len(result) == 1
         assert result[0].name == "brazil-roast5-session.json"
 
+    def test_finds_session_partial_json_files(self, tmp_path: Path) -> None:
+        """Matches *-session_partial.json but not other JSON files."""
+        (tmp_path / "brazil-roast5-session_partial.json").write_text("{}")
+        (tmp_path / "brazil-roast5_partial.json").write_text("{}")  # should not match
+        (tmp_path / "mic1-brazil-roast5-session_partial.json").write_text("{}")  # should not match
+        result = pa.find_session_files(tmp_path)
+        assert len(result) == 1
+        assert result[0].name == "brazil-roast5-session_partial.json"
+
     def test_returns_sorted(self, tmp_path: Path) -> None:
         """Results are sorted lexicographically."""
         for name in ["c-session.json", "a-session.json", "b-session.json"]:

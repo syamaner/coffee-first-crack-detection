@@ -166,12 +166,17 @@ def _patch_asyncio_event_loop_del():
     original_del = getattr(_base_events.BaseEventLoop, "__del__", None)
     if original_del is None:
         return
+    # Idempotency guard — avoid stacking wrappers on importlib.reload()
+    if getattr(original_del, "_spaces_app_patched", False):
+        return
     def _patched_del(self):
         try:
             original_del(self)
         except ValueError as exc:
-            if "Invalid file descriptor" not in str(exc):
+            # Suppress only the exact -1 fd error; re-raise anything else
+            if str(exc) != "Invalid file descriptor: -1":
                 raise
+    _patched_del._spaces_app_patched = True
     _base_events.BaseEventLoop.__del__ = _patched_del
 
 _patch_asyncio_event_loop_del()

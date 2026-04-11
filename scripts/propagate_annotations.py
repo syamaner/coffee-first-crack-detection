@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -87,8 +88,14 @@ def find_session_files(session_dir: Path) -> list[Path]:
     Returns:
         Sorted list of matching paths.
     """
+    # Per-mic WAV/annotation files start with mic{digit}- (e.g. mic1-brazil-roast5.wav).
+    # Filter them out so we only return files produced by record_mics.py.
+    _mic_prefix = re.compile(r"^mic\d")
     return sorted(
-        list(session_dir.glob("*-session.json")) + list(session_dir.glob("*-session_partial.json"))
+        p
+        for p in list(session_dir.glob("*-session.json"))
+        + list(session_dir.glob("*-session_partial.json"))
+        if not _mic_prefix.match(p.name)
     )
 
 

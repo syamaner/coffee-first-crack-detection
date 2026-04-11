@@ -106,7 +106,7 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 
 ## Active Context
 
-**Phase 7 complete.** S19 (#46) + S20 (#47) delivered. PR #48 open on `feature/46-multi-mic-recorder`.
+**Phase 7 complete.** S19 (#46) + S20 (#47) delivered in PR #48.
 
 **S19 — Multi-mic recording** (`scripts/record_mics.py`):
 - `RoastMics` CoreAudio Aggregate Device: FIFINE K669B (ch 0, Primary Clock) + ATR2100x (ch 1, Drift Correction)

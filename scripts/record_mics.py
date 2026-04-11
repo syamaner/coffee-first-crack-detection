@@ -223,12 +223,22 @@ def cmd_record(args: argparse.Namespace) -> None:
     recorded_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     start = time.monotonic()
 
+    # Rate-limit status warnings to avoid flooding stderr on transient glitches.
+    _status_warn_interval = 5.0
+    _last_status_warn: float = 0.0
+
     def _callback(
         indata: np.ndarray,
         _frames: int,
         _cb_time: object,
-        _status: object,
+        status: object,
     ) -> None:
+        nonlocal _last_status_warn
+        if status:
+            now = time.monotonic()
+            if now - _last_status_warn >= _status_warn_interval:
+                print(f"Warning: audio input status: {status}", file=sys.stderr)
+                _last_status_warn = now
         with lock:
             chunks.append(indata.copy())
 
