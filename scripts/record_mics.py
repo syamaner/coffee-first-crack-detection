@@ -208,7 +208,7 @@ def cmd_record(args: argparse.Namespace) -> None:
     # Accumulate audio chunks via callback
     chunks: list[np.ndarray] = []
     lock = threading.Lock()
-    recorded_at = datetime.now(UTC).isoformat(timespec="seconds")
+    recorded_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     start = time.monotonic()
 
     def _callback(

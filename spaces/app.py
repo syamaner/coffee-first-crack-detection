@@ -11,24 +11,32 @@ import asyncio.base_events as _base_events
 
 
 def _patch_asyncio_event_loop_del() -> None:
-    """Suppress harmless ValueError during event loop GC.
+    """Suppress the specific ``ValueError: Invalid file descriptor: -1`` during GC.
 
     Gradio 6.x creates intermediate asyncio event loops during startup.
     When these are garbage-collected, ``BaseEventLoop.__del__`` tries to
     close an already-invalid file descriptor (-1), producing noisy but
-    benign tracebacks in container logs.  This patch silences them.
+    benign tracebacks in container logs.  This patch silences that exact
+    error and re-raises any other ``ValueError`` so real errors are visible.
+
+    Idempotent: applying the patch more than once (e.g. via
+    ``importlib.reload()``) is a no-op.
     """
     original_del = getattr(_base_events.BaseEventLoop, "__del__", None)
     if original_del is None:
         return
+    # Idempotency guard — avoid stacking wrappers on reload
+    if getattr(original_del, "_spaces_app_patched", False):
+        return
 
-    def _patched_del(self):  # type: ignore[no-untyped-def]
+    def _patched_del(self: _base_events.BaseEventLoop) -> None:  # noqa: ANN
         try:
             original_del(self)
         except ValueError as exc:
-            if "Invalid file descriptor" not in str(exc):
+            if str(exc) != "Invalid file descriptor: -1":
                 raise
 
+    _patched_del._spaces_app_patched = True  # type: ignore[attr-defined]
     _base_events.BaseEventLoop.__del__ = _patched_del  # type: ignore[attr-defined]
 
 

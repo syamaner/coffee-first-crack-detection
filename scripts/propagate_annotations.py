@@ -77,8 +77,9 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
 def find_session_files(session_dir: Path) -> list[Path]:
     """Return sorted paths of all session JSON files in *session_dir*.
 
-    Session files are produced by ``record_mics.py`` and match the glob
-    pattern ``*-session.json``.
+    Discovers both complete sessions (``*-session.json``) and partial
+    sessions (``*-session_partial.json``) so that explicitly-annotated
+    short sessions can also be propagated.
 
     Args:
         session_dir: Directory to search.
@@ -86,7 +87,9 @@ def find_session_files(session_dir: Path) -> list[Path]:
     Returns:
         Sorted list of matching paths.
     """
-    return sorted(session_dir.glob("*-session.json"))
+    return sorted(
+        list(session_dir.glob("*-session.json")) + list(session_dir.glob("*-session_partial.json"))
+    )
 
 
 def get_audio_duration(audio_path: Path) -> float:
