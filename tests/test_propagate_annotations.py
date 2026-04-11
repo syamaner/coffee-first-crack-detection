@@ -157,17 +157,24 @@ class TestPropagateSessionHappyPath:
         # Session JSON
         _write_json(session_dir / f"{origin}-roast{roast_num}-session.json", session)
 
-        # Primary annotation JSON
+        # Primary annotation JSON — derive filename from mic['file'] in the session,
+        # matching the logic in propagate_session.
+        primary_entry = next((m for m in session["mics"] if int(m["mic_num"]) == primary_mic), None)
+        primary_filename = (
+            primary_entry["file"]
+            if primary_entry
+            else f"mic{primary_mic}-{origin}-roast{roast_num}.wav"
+        )
+        primary_stem = Path(primary_filename).stem
         primary_label = dict(_PRIMARY_LABEL)
-        primary_label["audio_file"] = f"mic{primary_mic}-{origin}-roast{roast_num}.wav"
-        _write_json(labels_dir / f"mic{primary_mic}-{origin}-roast{roast_num}.json", primary_label)
+        primary_label["audio_file"] = primary_filename
+        _write_json(labels_dir / f"{primary_stem}.json", primary_label)
 
-        # Stub WAVs for paired mics
+        # Stub WAVs for paired mics — use mic['file'] so names match session JSON.
         monkeypatch.setattr(pa.librosa, "get_duration", lambda **_: duration)
         for mic in session["mics"]:
             if int(mic["mic_num"]) != primary_mic:
-                wav = audio_dir / f"mic{mic['mic_num']}-{origin}-roast{roast_num}.wav"
-                wav.write_bytes(b"stub")
+                (audio_dir / mic["file"]).write_bytes(b"stub")
 
         return session_dir, labels_dir, audio_dir
 
@@ -229,15 +236,11 @@ class TestPropagateSessionHappyPath:
     def test_annotations_are_deep_copied(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Mutating one propagated JSON does not affect another."""
+        """Propagated annotation files are independent: mutating one does not affect another."""
         session_dir, labels_dir, audio_dir = self._setup(tmp_path, monkeypatch, _SESSION_3MIC)
-        # Write a second stub WAV for mic3
+        # _setup already wrote mic2 WAV stub; add mic3 WAV stub
         (audio_dir / "mic3-brazil-roast6.wav").write_bytes(b"stub")
         session_path = session_dir / "brazil-roast6-session.json"
-        _write_json(session_path, _SESSION_3MIC)
-        primary_label = dict(_PRIMARY_LABEL)
-        primary_label["audio_file"] = "mic1-brazil-roast6.wav"
-        _write_json(labels_dir / "mic1-brazil-roast6.json", primary_label)
 
         pa.propagate_session(
             session_path,
@@ -248,10 +251,28 @@ class TestPropagateSessionHappyPath:
             dry_run=False,
         )
 
-        r2 = _read_json(labels_dir / "mic2-brazil-roast6.json")
-        r3 = _read_json(labels_dir / "mic3-brazil-roast6.json")
-        # Independent lists — modifying one should not have affected the other
+        mic2_path = labels_dir / "mic2-brazil-roast6.json"
+        mic3_path = labels_dir / "mic3-brazil-roast6.json"
+        r2 = _read_json(mic2_path)
+        r3 = _read_json(mic3_path)
         assert r2["annotations"] == r3["annotations"]
+
+        # Mutate mic2 on disk and confirm mic3 is unchanged.
+        original_mic3_annotations = _read_json(mic3_path)["annotations"]
+        r2["annotations"].append(
+            {
+                "id": "chunk_999",
+                "start_time": 599.0,
+                "end_time": 600.0,
+                "label": "cooldown",
+                "confidence": "low",
+            }
+        )
+        _write_json(mic2_path, r2)
+
+        reread_mic3 = _read_json(mic3_path)
+        assert reread_mic3["annotations"] == original_mic3_annotations
+        assert _read_json(mic2_path)["annotations"] != reread_mic3["annotations"]
 
 
 # ---------------------------------------------------------------------------

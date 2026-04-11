@@ -159,7 +159,15 @@ def propagate_session(
         print("    ℹ️  No paired mics in this session — skipping")
         return 0, 0
 
-    primary_label_path = labels_dir / f"mic{primary_mic}-{origin}-roast{roast_num}.json"
+    # Resolve primary annotation path from the session's mics list so that any
+    # filename suffix (e.g. _partial) added by record_mics.py is respected.
+    primary_entry = next((m for m in mics if int(m["mic_num"]) == primary_mic), None)
+    if primary_entry:
+        primary_stem = Path(primary_entry["file"]).stem
+    else:
+        # primary mic was not part of this session (recorded separately)
+        primary_stem = f"mic{primary_mic}-{origin}-roast{roast_num}"
+    primary_label_path = labels_dir / f"{primary_stem}.json"
     if not primary_label_path.exists():
         print(f"    ⚠️  Primary annotation not found: {primary_label_path} — skipping")
         return 0, len(paired)
@@ -173,7 +181,11 @@ def propagate_session(
 
     for mic in paired:
         mic_num: int = int(mic["mic_num"])
-        target_path = labels_dir / f"mic{mic_num}-{origin}-roast{roast_num}.json"
+        # Use the filename recorded in the session JSON — preserves any suffix
+        # (e.g. _partial) and stays consistent with convert_labelstudio_export.py.
+        wav_filename: str = mic["file"]
+        wav_stem = Path(wav_filename).stem
+        target_path = labels_dir / f"{wav_stem}.json"
 
         if target_path.exists() and not overwrite:
             print(
@@ -182,7 +194,7 @@ def propagate_session(
             skipped += 1
             continue
 
-        wav_path = audio_dir / f"mic{mic_num}-{origin}-roast{roast_num}.wav"
+        wav_path = audio_dir / wav_filename
         try:
             duration = get_audio_duration(wav_path)
         except (FileNotFoundError, RuntimeError) as exc:
@@ -191,7 +203,7 @@ def propagate_session(
             continue
 
         paired_annotation: dict[str, Any] = {
-            "audio_file": f"mic{mic_num}-{origin}-roast{roast_num}.wav",
+            "audio_file": wav_filename,
             "duration": duration,
             "sample_rate": sample_rate,
             "annotations": copy.deepcopy(annotations),
