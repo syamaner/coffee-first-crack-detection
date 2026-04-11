@@ -132,8 +132,12 @@ def cmd_record(args: argparse.Namespace) -> None:
     device: str | int = (
         args.device if args.device is not None else recording_cfg.get("device", _DEFAULT_DEVICE)
     )
-    sample_rate: int = args.sample_rate or int(
-        recording_cfg.get("sample_rate", _DEFAULT_SAMPLE_RATE)
+    # Use `is not None` so an explicit --sample-rate 0 is not silently discarded
+    # (mirrors the --device fix).
+    sample_rate: int = (
+        args.sample_rate
+        if args.sample_rate is not None
+        else int(recording_cfg.get("sample_rate", _DEFAULT_SAMPLE_RATE))
     )
     mics: list[int] = args.mics
 
@@ -149,6 +153,10 @@ def cmd_record(args: argparse.Namespace) -> None:
         sys.exit(1)
     if args.min_duration < 1:
         print(f"Error: --min-duration must be >= 1, got {args.min_duration}")
+        sys.exit(1)
+    if sample_rate < 1:
+        source = "--sample-rate" if args.sample_rate is not None else "config/default"
+        print(f"Error: sample_rate must be >= 1, got {sample_rate} (from {source})")
         sys.exit(1)
 
     # Validate mic numbers: must be >= 1 and unique

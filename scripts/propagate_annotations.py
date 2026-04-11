@@ -88,9 +88,11 @@ def find_session_files(session_dir: Path) -> list[Path]:
     Returns:
         Sorted list of matching paths.
     """
-    # Per-mic WAV/annotation files start with mic{digit}- (e.g. mic1-brazil-roast5.wav).
-    # Filter them out so we only return files produced by record_mics.py.
-    _mic_prefix = re.compile(r"^mic\d")
+    # Per-mic WAV/annotation files start with mic{digits}- (e.g. mic1-brazil-roast5.wav).
+    # Filter them out so we only return session files produced by record_mics.py.
+    # Use mic\d+- (digits + hyphen) to avoid excluding a session whose origin
+    # slug starts with e.g. 'mic' but is not followed by a digit-hyphen prefix.
+    _mic_prefix = re.compile(r"^mic\d+-")
     return sorted(
         p
         for p in list(session_dir.glob("*-session.json"))
