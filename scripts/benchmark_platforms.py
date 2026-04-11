@@ -65,8 +65,7 @@ def benchmark_pytorch(
         "n_runs": n_runs,
     }
     print(
-        f"  p50={stats['p50_ms']:.1f}ms  p95={stats['p95_ms']:.1f}ms  "
-        f"mean={stats['mean_ms']:.1f}ms"
+        f"  p50={stats['p50_ms']:.1f}ms  p95={stats['p95_ms']:.1f}ms  mean={stats['mean_ms']:.1f}ms"
     )
     return stats
 
@@ -111,8 +110,7 @@ def benchmark_onnx_runtime(
         "n_runs": n_runs,
     }
     print(
-        f"  p50={stats['p50_ms']:.1f}ms  p95={stats['p95_ms']:.1f}ms  "
-        f"mean={stats['mean_ms']:.1f}ms"
+        f"  p50={stats['p50_ms']:.1f}ms  p95={stats['p95_ms']:.1f}ms  mean={stats['mean_ms']:.1f}ms"
     )
     return stats
 

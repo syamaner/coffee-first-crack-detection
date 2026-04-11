@@ -152,19 +152,37 @@ ValueError: Invalid file descriptor: -1
   File "asyncio/base_events.py", BaseEventLoop.__del__
 ```
 
-The error came from Python's asyncio event loop destructor. Gradio 6.x ships with an experimental SSR mode — server-side rendering — which is enabled by default. SSR involves additional async initialisation that, on Python 3.13, triggers a cleanup path in `BaseEventLoop.__del__` that fails with a bad file descriptor. It is a known incompatibility between Gradio's SSR implementation and Python 3.13's updated asyncio lifecycle.
+The error came from Python's asyncio event loop destructor. Gradio 6.x creates intermediate event loops during startup. When those loops are garbage-collected, `BaseEventLoop.__del__` tries to close an already-invalid file descriptor (-1). The traceback is logged as `Exception ignored in:` — Python catches and discards it. The app runs correctly; the error is cosmetic.
 
-The Space was running Python 3.13 (HF's current default). HF Spaces runs `python app.py` directly, so the fix was a single argument added to `demo.launch()`:
+The initial diagnosis pointed to Gradio's experimental SSR mode, which is enabled by default. Adding `ssr_mode=False` to `demo.launch()` removed the SSR startup banner but did not suppress the GC error — it occurs regardless of SSR state, on both Python 3.12 and 3.13.
+
+The actual fix was a monkey-patch applied before Gradio is imported, suppressing the specific `ValueError` during event loop cleanup:
 
 ```python
-# spaces/app.py
-if __name__ == "__main__":
-    demo.launch(ssr_mode=False)
+# spaces/app.py — applied before `import gradio`
+import asyncio.base_events as _base_events
+
+def _patch_asyncio_event_loop_del():
+    original_del = getattr(_base_events.BaseEventLoop, "__del__", None)
+    if original_del is None:
+        return
+    # Idempotency guard — avoid stacking wrappers on importlib.reload()
+    if getattr(original_del, "_spaces_app_patched", False):
+        return
+    def _patched_del(self):
+        try:
+            original_del(self)
+        except ValueError as exc:
+            # Suppress only the exact -1 fd error; re-raise anything else
+            if str(exc) != "Invalid file descriptor: -1":
+                raise
+    _patched_del._spaces_app_patched = True
+    _base_events.BaseEventLoop.__del__ = _patched_del
+
+_patch_asyncio_event_loop_del()
 ```
 
-That is the entire change in [PR #33](https://github.com/syamaner/coffee-first-crack-detection/pull/33). One argument. The Space came up cleanly on the next deploy.
-
-I copied the two relevant lines from the HF Space log — the SSR warning and the `ValueError` — and pasted them to Oz. The diagnosis was immediate: SSR mode interacting with Python 3.13's asyncio cleanup. The fix followed in the same response. That is the actual human-in-the-loop pattern for this class of debugging: the human reads the log and provides the context; the agent does the diagnosis and the code change.
+I pasted the HF Space log to Oz, got the SSR diagnosis, pushed the `ssr_mode=False` fix, and confirmed the error persisted. A second search identified the root cause as Gradio's event loop lifecycle, not SSR specifically. The monkey-patch landed as a follow-up. Two iterations of the same human-in-the-loop pattern: read the log, paste to Oz, push the fix, verify.
 
 ## CI/CD: What Was Designed
 
@@ -219,6 +237,6 @@ The prototype that started this ran on a laptop. This one runs on a $60 ARM boar
 
 - **[HF Inference Providers Documentation](https://huggingface.co/docs/inference-providers/index)** — Documents which model types are eligible for automatic inference widget hosting and which require explicit provider deployment. The gap between `pipeline_tag` and a working widget is explained here.
 
-#### 3. Python 3.13 & asyncio
+#### 3. Python asyncio & Gradio Event Loop Cleanup
 
-- **[Python 3.13 What's New — asyncio changes](https://docs.python.org/3/whatsnew/3.13.html)** — The asyncio event loop lifecycle changes in 3.13 are the root cause of the SSR/`BaseEventLoop.__del__` incompatibility with Gradio 6.x's experimental SSR mode.
+- **[CPython asyncio `BaseEventLoop.__del__`](https://github.com/python/cpython/blob/main/Lib/asyncio/base_events.py)** — The destructor that raises `ValueError: Invalid file descriptor: -1` when garbage-collecting event loops whose self-pipe is already closed. Affects Python 3.12 and 3.13 when Gradio creates intermediate loops during startup.

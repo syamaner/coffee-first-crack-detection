@@ -95,7 +95,8 @@ exclude = ["**/node_modules", "**/__pycache__", "data", "experiments"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=coffee_first_crack --cov-report=term-missing -m not slow"
+pythonpath = ["."]
+addopts = "--cov=coffee_first_crack --cov-report=term-missing -m 'not slow'"
 markers = [
     "slow: marks tests that load large models from HuggingFace Hub (run with -m slow)",
 ]

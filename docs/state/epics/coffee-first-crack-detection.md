@@ -1,8 +1,8 @@
 # Epic: Coffee First Crack Detection — HuggingFace Model Repository
 
 **GitHub Issue**: [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1)
-**Status**: ✅ Complete — all 18 stories done, epic closed
-**Last Updated**: 2026-04-04
+**Status**: 🔄 Active — Phase 7 complete (S19 + S20 delivered); recording data collection in progress
+**Last Updated**: 2026-04-11
 
 ## Objective
 Create a standalone, HuggingFace-publishable repository for training, evaluating, and publishing the coffee first crack audio detection model. Extracted from the `coffee-roasting` monorepo. Targets M3+ Mac (MPS), RTX 4090 (CUDA), and Raspberry Pi 5 (ONNX/CPU).
@@ -83,11 +83,44 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
   - Space linked to model card via `models:` field — appears in "Spaces using this model"
   - `spaces/` directory committed to git for version control
 
+### Phase 7 — Data Collection Infrastructure
+- [x] S19 [#46](https://github.com/syamaner/coffee-first-crack-detection/issues/46): Multi-mic synchronized recording tool for dataset expansion ✅
+  - macOS CoreAudio Aggregate Device (`RoastMics`), 1–N mic support via `--mics` list
+  - `scripts/record_mics.py` — `list-devices` + `record` subcommands; labels from `configs/default.yaml`
+  - `configs/default.yaml` — `recording` section (device, sample_rate, mic_labels)
+  - `docs/multi_mic_setup.md` — full hardware setup guide + calibrated gain settings (2026-04-11)
+  - MCP server `find_usb_microphone()` patched to prefer `RoastMics` aggregate (coffee-roasting repo)
+  - First real roasts captured: `panama-hortigal-estate-roast1` (12.8 min), `roast2` (15.1 min)
+- [x] S20 [#47](https://github.com/syamaner/coffee-first-crack-detection/issues/47): Annotation propagation for paired multi-mic recordings ✅
+- [ ] S21 [#49](https://github.com/syamaner/coffee-first-crack-detection/issues/49): Streaming disk writes + post-recording verification for record_mics.py
+  - Replace in-memory buffer with producer-consumer queue → soundfile.SoundFile writer thread
+  - SIGTERM handler for clean shutdown; crash-safe for soft kills
+  - Temp `_recording` filenames renamed to final/partial on stop
+  - `--verify` flag: peak/RMS/dBFS per mic, sample-lock check, balance check, session JSON validation
+  - `scripts/propagate_annotations.py` — reads `*-session.json`, propagates primary mic annotation to all paired mics
+  - Uses `mic['file']` from session JSON — handles `_partial` suffix and future naming variants
+  - Slots between `convert_labelstudio_export.py` and `chunk_audio.py`; zero pipeline changes
+  - 16 tests; Copilot review comments addressed (PR #48)
+
 ---
 
 ## Active Context
 
-**Epic complete.** All 18 stories delivered across 6 phases. Issues #24, #25, #26 closed. Epic issue #1 fully checked off.
+**Phase 7 complete.** S19 (#46) + S20 (#47) delivered in PR #48.
+
+**S19 — Multi-mic recording** (`scripts/record_mics.py`):
+- `RoastMics` CoreAudio Aggregate Device: FIFINE K669B (ch 0, Primary Clock) + ATR2100x (ch 1, Drift Correction)
+- Calibrated gain: FIFINE 25.5 dB software + ~60% physical knob; ATR2100x Front Left/Right 18.38/18.75 dB
+- Indefinite recording, Ctrl-C stop, `_partial` suffix for sessions < 60s
+- Session JSON captures hardware labels, gains, duration, ISO timestamp
+- First real paired roasts: `panama-hortigal-estate-roast1` (12.8 min), `roast2` (15.1 min) — pending annotation
+- MCP conflict resolved: `find_usb_microphone()` now prefers `RoastMics` over raw FIFINE
+
+**S20 — Annotation propagation** (`scripts/propagate_annotations.py`):
+- Reads `*-session.json` → copies primary mic annotation JSON to all paired mics
+- `--dry-run`, `--overwrite`, `--primary-mic` flags
+- Uses `mic['file']` from session JSON for all filename resolution (handles `_partial` suffix)
+- 16 tests, ruff + pyright clean, Copilot review comments addressed
 
 **Gradio Space** (S18 / #25): https://huggingface.co/spaces/syamaner/coffee-first-crack-detection
 - Dropdown: "First crack (10s)" / "No first crack (10s)" pre-loaded examples

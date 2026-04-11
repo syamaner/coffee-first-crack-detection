@@ -209,6 +209,52 @@ All four engineering decisions described in this post — the annotation redesig
 
 ---
 
+## Addendum: Fixing the 27.4-Second Problem
+
+*Written after the initial weekend, having run the prototype through a production roast season and watched exactly where it breaks.*
+
+The 27.4-second detection delay on the mic-2 test recording is not a modelling artifact. It is reproducible. The model genuinely struggles to identify first crack on a dynamic microphone because 9 of its 15 training recordings used a condenser. The feature extractor learned first crack as it sounds through the FIFINE's acoustic lens — its sensitivity curve, its noise floor, its handling of attack transients. When the ATR2100x presents a different acoustic signature for the same physical event, the model stalls until it has accumulated enough evidence to override its prior.
+
+Hyperparameter changes will not fix a distribution shift that lives in the training data. The fix is more mic-2 data — specifically, paired recordings that capture the same first crack event through both microphones simultaneously.
+
+### The synchronisation problem
+
+Two USB microphones cannot simply be opened as two independent `sounddevice` streams and assumed to stay aligned over a 10-minute roast. Each USB mic has its own internal timing crystal. Without an external synchronisation mechanism, clock drift accumulates at a rate of roughly 10–50 parts per million per second — small enough to be invisible for the first few minutes, large enough to produce a 30–300ms desync by the end of a full roast. That desync makes cross-mic annotation timestamps unreliable.
+
+The correct solution on macOS is a CoreAudio **Aggregate Device**. Audio MIDI Setup creates a virtual multi-channel input (`RoastMics`) that combines the FIFINE and ATR2100x into one stream. **Drift Correction** on the secondary mic forces CoreAudio to continuously resample it to stay sample-locked with the primary. The result is two channels in a single array: if a first crack pop arrives at sample index N in ch 0, it arrives at sample index N in ch 1. The files are physically locked.
+
+The consequence for annotation is significant. A 12-minute dual-mic roast requires one Label Studio annotation pass — on the FIFINE track. The ATR2100x annotation is a copy: `propagate_annotations.py` reads the `*-session.json` written by the recorder, finds the primary mic's label JSON, and writes an identical JSON for each paired mic with only `audio_file` and `duration` updated. Every chunk produced by `chunk_audio.py` from the ATR2100x recording carries ground truth that took zero extra annotation time to produce.
+
+### What broke at the first real roast
+
+The MCP server — the live first crack detector running during autonomous roasting — opens the FIFINE directly by device index. On macOS, this holds an exclusive CoreAudio stream claim on the raw device. When the Aggregate Device tries to include a subdevice that is already exclusively claimed, it drops the device entirely and shows "No Devices in Aggregate" with 0 input channels. The recorder cannot open `RoastMics` because the aggregate has no members.
+
+The fix was a single addition to `find_usb_microphone()` in the coffee-roasting repo: check for a device named `RoastMics` before falling back to the raw FIFINE. If the aggregate exists, the detector opens it at ch 0, which is the FIFINE channel. CoreAudio multiplexes the hardware internally. Both the live detector and the dual-mic recorder can run in the same session.
+
+Two batches of Copilot review on PR #48 caught additional bugs. The annotation propagation script reconstructed paired filenames from `origin` and `roast_num` — `f"mic{n}-{origin}-roast{roast_num}.wav"`. Sessions shorter than 60 seconds are saved with a `_partial` suffix. The reconstructed name would not match, and propagation would silently skip those sessions. Fix: read `mic['file']` from the session JSON directly.
+
+The recorder had two further silent failure modes. `--mics 0 1` computes `ch_idx = m - 1 = -1`, which in NumPy reads the last column — wrong channel, no error. `--mics 1 1 2` with duplicates writes the same output file twice, the second pass overwriting the first. Both are now rejected at startup with an error message. The preflight existence check also only covered non-partial filenames; a re-run after a short failed session would overwrite prior `_partial` files silently. That was fixed to check both suffixes upfront.
+
+These are the kind of bugs that automated review catches and live testing misses — every test session during development used `--mics 1 2` with valid, unique values.
+
+A third review batch caught four more issues, smaller in blast radius but worth documenting. `find_session_files()` only globbed for `*-session.json`, so an annotated `_partial` session would report "No session files found" with no explanation. `recorded_at` in the session JSON used Python's `datetime.isoformat()` which produces `+00:00` rather than the `Z` suffix shown in every spec example and test fixture — a cosmetic inconsistency but one that would confuse anyone comparing output to documentation. In `spaces/app.py`, the asyncio patch suppressed any `ValueError` containing `"Invalid file descriptor"` rather than the exact string `"Invalid file descriptor: -1"`, risking suppression of different fd errors. The same patch also lacked an idempotency guard, meaning `importlib.reload()` would stack wrappers on `BaseEventLoop.__del__` indefinitely. All four fixed.
+
+A fourth batch caught two more code issues. The `--origin` argument was interpolated directly into output filenames with no validation — `--origin "brazil/2026"` writes a file with a path separator in the name, and with a long enough string can escape `--output-dir` entirely. Added `re.fullmatch(r'[a-z0-9-]+')` validation matching the same convention as `dataset.py`'s filename parser, plus a guard that `--roast-num` must be ≥ 1. The `chunks` list was also read for concatenation without holding `lock` after `stream.stop()` — technically ordered, but missing the explicit memory barrier a lock provides on some architectures. Fixed to copy under lock before processing.
+
+A fifth batch found a silent dtype upcast. `recording[:, ch_idx] * gain` where `gain` is a Python `float` promotes the `sounddevice` `float32` buffer to `float64`. `soundfile.write()` picks up that dtype and writes 64-bit float WAVs — twice the file size, no warning, no error. Fixed with `np.float32(gain)`, `.astype(np.float32, copy=False)`, and an explicit `subtype="FLOAT"` on the write call.
+
+A sixth batch caught two further issues. The `sounddevice` callback had been silently discarding the `status` object. An input overflow or underflow drops audio frames without any user-visible indication — a complete recording session could finish with corrupted audio and no log entry. Now prints a rate-limited warning to stderr (at most once per 5 seconds) so an operator running a real roast can see xruns as they happen. Separately, the `*-session_partial.json` glob in `find_session_files()` also matched `mic1-brazil-roast5-session_partial.json` — a per-mic annotation file, not a session file. The test written for this batch caught it. The fix is a `re.compile(r'^mic\d')` prefix filter; six rounds of review, 17 tests passing.
+
+### Where this lands
+
+The current dataset is 15 recordings, 973 chunks, 9:6 condenser-to-dynamic. Two Panama Hortigal Estate roasts have been captured with the new dual-mic setup — 12.8 and 15.1 minutes of paired audio, sample-locked, pending Label Studio annotation. Each annotated dual-mic roast adds one mic-1 and one mic-2 recording at 1:1 ratio, closing the imbalance that produced the 27.4-second delay. The prototype detected first crack correctly on both roasts without any model changes.
+
+The recorder currently buffers all audio in RAM and writes on stop. This is fine for the target hardware but loses data on a hard kill (SIGTERM). A follow-up story (S21) will replace the in-memory accumulation with a producer-consumer queue writing continuously to disk, plus an optional `--verify` flag that runs automated peak, balance, and sample-lock checks after each session.
+
+The infrastructure to grow the dataset is now the same effort as roasting the coffee.
+
+---
+
 ## References
 
 #### 1. Data Leakage in Time-Series & Audio ML
