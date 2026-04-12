@@ -10,9 +10,9 @@ description: Evaluate a trained checkpoint on the test set and produce a full me
 **1. Run evaluation**
 ```bash
 python -m coffee_first_crack.evaluate \
-  --model-dir experiments/baseline_v1/checkpoint-best \
+  --model-dir experiments/baseline_v5/checkpoint-best \
   --test-dir data/splits/test \
-  --output-dir experiments/baseline_v1/evaluation
+  --output-dir experiments/baseline_v5/evaluation
 ```
 
 Or evaluate a HuggingFace Hub checkpoint:

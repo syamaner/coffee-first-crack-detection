@@ -22,10 +22,10 @@ audio:
 
 training:
   batch_size: 8
-  learning_rate: 2.0e-5
+  learning_rate: 5.0e-5
   num_epochs: 20
-  warmup_steps: 100
-  weight_decay: 0.05
+  warmup_steps: 250
+  weight_decay: 0.1
   max_grad_norm: 1.0
   seed: 42
   # Cropping mode: random (train) / center (eval)

@@ -1,0 +1,14 @@
+{
+  "audio_file": "mic2-panama-hortigal-estate-roast2.wav",
+  "duration": 907.9512471655329,
+  "sample_rate": 44100,
+  "annotations": [
+    {
+      "id": "chunk_000",
+      "start_time": 789.6711861177388,
+      "end_time": 868.8238187121559,
+      "label": "first_crack",
+      "confidence": "high"
+    }
+  ]
+}

@@ -17,7 +17,7 @@ description: End-to-end training of the coffee first crack detection model. Use 
 ls data/splits/train/first_crack/ | wc -l
 ls data/splits/train/no_first_crack/ | wc -l
 ```
-Expect ~145+ files per class in train. If missing, run the data prep pipeline first.
+Expect ~150+ first_crack and ~750+ no_first_crack in train (21 recordings, 1,435 total chunks as of April 2026). If missing, run the data prep pipeline first (see `docs/data_preparation.md` Steps 3–6).
 
 **2. Review config**
 Check `configs/default.yaml` — key values:
@@ -30,20 +30,25 @@ Check `configs/default.yaml` — key values:
 ```bash
 python -m coffee_first_crack.train \
   --data-dir data/splits \
-  --experiment-name baseline_v1
+  --experiment-name baseline_v7
+```
+
+Or use the full pipeline script:
+```bash
+./scripts/rebuild_and_train.sh baseline_v7
 ```
 
 For CUDA with mixed precision:
 ```bash
 python -m coffee_first_crack.train \
   --data-dir data/splits \
-  --experiment-name baseline_v1 \
+  --experiment-name baseline_v7 \
   --fp16
 ```
 
 **4. Monitor**
 ```bash
-tensorboard --logdir experiments/baseline_v1/logs
+tensorboard --logdir experiments/<experiment-name>/logs
 ```
 
 **5. Validate results**

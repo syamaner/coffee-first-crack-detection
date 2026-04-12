@@ -63,15 +63,15 @@ Estate roasts. Set these before each session.
 ### FIFINE K669B (USB PnP Audio Device)
 
 - **Physical knob on mic**: ~60% of max (adjust if still clipping on crack pops)
-- **macOS software gain**: `25.5 dB` (slider value `0.677` on the 0–31 scale)
+- **macOS software gain**: `23.00 dB` (slider value `0.677` on the 0–31 scale)
 
 ### Audio-Technica ATR2100x
 
 In Audio MIDI Setup → select **ATR2100x-USB Microphone** (the individual device,
 not RoastMics):
 
-- **Front Left**: `18.38 dB` (value `0.826`)
-- **Front Right**: `18.75 dB` (value `0.847`) — keep matched to Front Left
+- **Front Left**: `20.1 dB` (value `0.885`)
+- **Front Right**: `20.1 dB` (value `0.885`) — keep matched to Front Left
 
 > **Rule:** hardware-first gain is always preferred. If the FIFINE is clipping,
 > turn the physical knob down — don't touch the software slider.

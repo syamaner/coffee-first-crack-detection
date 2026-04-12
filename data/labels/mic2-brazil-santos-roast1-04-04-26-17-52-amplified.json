@@ -1,12 +1,12 @@
 {
-  "audio_file": "mic2-brazil-santos-roast1-04-04-26-17-52.wav",
+  "audio_file": "mic2-brazil-santos-roast1-04-04-26-17-52-amplified.wav",
   "duration": 725.8347845804989,
   "sample_rate": 44100,
   "annotations": [
     {
       "id": "chunk_000",
-      "start_time": 564.1093289882748,
-      "end_time": 686.950749693261,
+      "start_time": 626.3276634277616,
+      "end_time": 687.5433988578053,
       "label": "first_crack",
       "confidence": "high"
     }

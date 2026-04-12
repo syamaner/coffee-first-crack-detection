@@ -128,32 +128,36 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 - Linked to model card via `models:` field (appears in "Spaces using this model")
 - `spaces/` committed to git; Gradio 6.11.0, CPU free tier
 
-**Dataset v2**: 973 fixed 10s chunks from 15 recordings (9 legacy + 6 mic2)
-- 197 first_crack (~20%) / 776 no_first_crack (~80%)
+**Dataset v3**: 1,435 fixed 10s chunks from 21 recordings (9 legacy + 6 mic2-amplified + 3 mic1-panama + 3 mic2-panama)
+- 223 first_crack (~16%) / 1,212 no_first_crack (~84%)
 - Recording-level splitting prevents data leakage
-- All files re-annotated with single-region approach (1 first_crack region per roast)
+- 6 older mic2 recordings amplified (+11–13 dB) to match calibrated gain, re-annotated
+- 3 panama roasts recorded with dual mics (FIFINE + Audio-Technica), separate hardware
 
-**baseline_v2 training (tuned hyperparams)**:
-- Attempt 1 (lr=5e-5): peaked epoch 7 at 95.38% / 0.866 F1, oscillating loss, overfitting
-- Attempt 2 (lr=2e-5, weight_decay=0.05, early_stop=3): best epoch 2, early stopped epoch 5
-- Test set: **97.4% acc / 0.925 F1 / 100% precision / 86.1% recall / 0.982 ROC-AUC**
-- Zero false positives (0 FP), 5 false negatives (5 FN out of 36 FC chunks)
+**baseline_v5 training (partial freeze + augmentation)**:
+- Partial backbone freeze: last 2 AST layers + layernorm unfrozen (~14M trainable / 72M frozen)
+- Data augmentation: random amplitude scaling (±30%) + Gaussian noise injection
+- Hyperparams: lr=5e-5, weight_decay=0.1, warmup_steps=250, early_stopping=3
+- Best epoch 2, early stopped epoch 5
+- Test set: **97.7% acc / 0.921 F1 / 87.2% precision / 97.6% recall / 0.997 ROC-AUC**
+- 1 false negative, 6 false positives (42 FC test chunks)
 
-**Full-recording detection latency** (sliding window on raw test WAVs):
-- 25-10-19_1236-brazil-3 (mic-1): onset 452.7s → detected 453.0s — **0.3s delay**
-- mic2-brazil-roast2 (mic-2): onset 599.6s → detected 627.0s — **27.4s delay**
-- roast-2-costarica-hermosa-hp-a (mic-1): onset 441.0s → detected 441.0s — **0.0s delay**
-- Mic-1 detection is near-instant; mic-2 has higher delay due to less training data from that mic
+**Full-file detection on test set** (sliding window, threshold=0.6, min_pops=5):
+- mic1-panama-roast2: GT 13:09 → detected 13:03 — **-6s** ✅
+- mic2-brazil-roast3-amplified: GT 10:39 → detected 10:33 — **-6s** ✅
+- mic2-panama-roast1 (amplified): GT 11:05 → detected 10:57 — **-8s** ✅
+- roast-3-costarica-hermosa-hp-a: GT 07:19 → **MISSED** ❌ (legacy mic-1, low signal)
+- Detection rate: 3/4 test files, all detections within 8s of ground truth
 
 **Model on HuggingFace**: https://huggingface.co/syamaner/coffee-first-crack-detection
-- baseline_v1: 91.1% test acc / 0.913 F1 / 95.5% first_crack recall / 0.978 ROC-AUC
-- Trained on mic-1 only (298 chunks, 6 roasts)
+- baseline_v5: 97.7% test acc / 0.921 F1 / 97.6% recall / 87.2% precision / 0.997 ROC-AUC
+- Trained on 21 recordings (1,435 chunks), partial freeze + augmentation
+- Pushed 2026-04-12, replacing baseline_v1
 
-**ONNX Models**: exported from baseline_v1 checkpoint, **published to HuggingFace Hub** (2026-04-04)
-- FP32: 345MB → `onnx/fp32/model.onnx` on HF Hub
-- INT8: 90MB → `onnx/int8/model_quantized.onnx` on HF Hub — recommended for RPi5
+**ONNX Models**: exported from baseline_v5 checkpoint, **published to HuggingFace Hub** (2026-04-12)
+- FP32: 345MB → `onnx/fp32/model.onnx` on HF Hub (p50=381ms Mac)
+- INT8: 90MB → `onnx/int8/model_quantized.onnx` on HF Hub (p50=201ms Mac) — recommended for RPi5
 - Config JSONs (`config.json`, `preprocessor_config.json`) also uploaded for `from_pretrained()` support
-- Zero quality degradation from quantization (identical confusion matrix)
 
 **RPi5 Validation** (issue #22, branch `feature/22-rpi5-onnx-validation`):
 - Quality: 93.3% acc / 0.933 F1 — identical to Mac across all ONNX variants
@@ -167,7 +171,8 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 - Hardware requirements: adequate PSU + active cooler for stable 2-thread operation
 - See "RPi5 Validation Results" section below for full breakdown
 
-**Dataset**: NOT yet published — pending push to HF Hub.
+**Dataset**: published to HF Hub (2026-04-12) — https://huggingface.co/datasets/syamaner/coffee-first-crack-audio
+- train=922, val=210, test=303 (1,435 total chunks from 21 recordings)
 
 **Blog series**: planned 3-part series covering training, MCP servers, and .NET Aspire agent.
 
@@ -196,7 +201,9 @@ python scripts/push_to_hub.py \
 | Original prototype | ~93% | ~0.93 | 100% | coffee-roasting monorepo, custom Trainer |
 | baseline_v1 (mic-1 only, MPS) | 95.6% (val) / 91.1% (test) | 0.955 / 0.913 | 95.5% | PR #18, 208 train samples |
 | baseline_v2 MPS attempt 1 | 95.38% (val, epoch 7) | 0.866 | — | 587 train, overfitting after epoch 7, lr too high |
-| **baseline_v2 (tuned, MPS)** | **97.4% (test)** | **0.925** | **86.1%** | **973 chunks, 15 recs, 100% precision, 0 FP** |
+| baseline_v2 (tuned, MPS) | 97.4% (test) | 0.925 | 86.1% | 973 chunks, 15 recs, 100% precision, 0 FP |
+| baseline_v3 (full FT, 21 recs) | 96.0% (test) | 0.872 | 93.2% | 1,435 chunks, overfitting (train loss→0 by epoch 3) |
+| **baseline_v5 (partial freeze + aug)** | **97.7% (test)** | **0.921** | **97.6%** | **1,435 chunks, 21 recs, 14M trainable, 3/4 test files detected** |
 | ONNX FP32 (Mac, auto threads) | 93.3% | 0.933 | 95.5% | p50=375ms ✅ |
 | ONNX INT8 (Mac, auto threads) | 93.3% | 0.933 | 95.5% | p50=197ms ✅ |
 | ONNX INT8 (RPi5, 4 threads, fan) | 93.3% | 0.933 | 95.5% | p50=2,070ms ⭐ recommended |
