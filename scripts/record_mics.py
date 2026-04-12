@@ -47,6 +47,170 @@ _DEFAULT_MICS = [1, 2]
 _DEFAULT_MIN_DURATION_SEC = 60
 _CONFIG_PATH = Path("configs/default.yaml")
 
+# Level-monitoring thresholds
+_SILENCE_THRESHOLD_DBFS: float = -60.0  # below this → mic is considered silent
+_BALANCE_WARN_DB: float = 6.0  # RMS difference above this → balance warning
+_SILENCE_CHECK_AFTER_SEC: float = 5.0  # seconds before first silence check fires
+
+
+# ---------------------------------------------------------------------------
+# Audio statistics helpers
+# ---------------------------------------------------------------------------
+
+
+def _dbfs(arr: np.ndarray) -> tuple[float, float]:
+    """Return (peak_dBFS, rms_dBFS) for a 1-D float32 audio array.
+
+    Args:
+        arr: 1-D float32 array with values in ``[-1.0, 1.0]``.
+
+    Returns:
+        Tuple of ``(peak_dBFS, rms_dBFS)``.  Both values are ``-120.0`` when
+        *arr* is empty (avoids ``log(0)``).
+    """
+    if arr.size == 0:
+        return -120.0, -120.0
+    peak = 20.0 * np.log10(float(np.max(np.abs(arr))) + 1e-12)
+    rms = 20.0 * np.log10(float(np.sqrt(np.mean(arr**2))) + 1e-12)
+    return peak, rms
+
+
+def _mic_stats_from_chunks(
+    chunks: list[np.ndarray],
+    mics: list[int],
+    gains: list[float],
+    start_chunk: int = 0,
+) -> list[dict[str, float]]:
+    """Compute peak and RMS dBFS per mic from a slice of audio chunks.
+
+    Gain is applied and signal clipped to ``[-1, 1]`` before computing stats,
+    matching the final WAV write logic so heartbeat values match the recording.
+
+    Args:
+        chunks: Full list of multi-channel audio chunks, each with shape
+            ``(frames, n_channels)``.
+        mics: Ordered mic numbers (1-indexed; mic N uses channel index N-1).
+        gains: Per-mic digital gain multipliers, same length as *mics*.
+        start_chunk: Index into *chunks* to start from.  Pass the chunk count
+            at the previous heartbeat to obtain window-only stats.
+
+    Returns:
+        List of dicts with keys ``"peak"`` and ``"rms"`` (dBFS) per mic, in
+        the same order as *mics*.  Returns ``-120.0`` for both fields when the
+        requested window is empty.
+    """
+    window = chunks[start_chunk:]
+    if not window:
+        return [{"peak": -120.0, "rms": -120.0} for _ in mics]
+    audio = np.concatenate(window, axis=0)  # (frames, n_channels)
+    result: list[dict[str, float]] = []
+    for m, gain in zip(mics, gains, strict=True):
+        ch: np.ndarray = np.clip(audio[:, m - 1] * np.float32(gain), -1.0, 1.0).astype(
+            np.float32, copy=False
+        )
+        peak, rms = _dbfs(ch)
+        result.append({"peak": peak, "rms": rms})
+    return result
+
+
+def _format_heartbeat(
+    elapsed_sec: float,
+    stats: list[dict[str, float]],
+    mics: list[int],
+    labels: list[str],
+) -> str:
+    """Format a heartbeat line with per-mic level stats and a balance indicator.
+
+    Stats should cover the most recent 30-second window (since the last
+    heartbeat) so the line reflects current signal conditions.
+
+    Args:
+        elapsed_sec: Total elapsed recording time in seconds.
+        stats: Per-mic stats dicts from :func:`_mic_stats_from_chunks`.
+        mics: Ordered mic numbers.
+        labels: Per-mic hardware labels, same length as *mics*.
+
+    Returns:
+        Formatted single-line string, ready to ``print()``.
+    """
+    mins, secs = divmod(int(elapsed_sec), 60)
+    parts: list[str] = []
+    for mic_stats, m, lbl in zip(stats, mics, labels, strict=True):
+        parts.append(f"mic{m}({lbl}): peak={mic_stats['peak']:.1f} rms={mic_stats['rms']:.1f} dBFS")
+    if len(stats) >= 2:
+        rms_vals = [s["rms"] for s in stats]
+        balance = max(rms_vals) - min(rms_vals)
+        bal_sym = "\u26a0\ufe0f" if balance > _BALANCE_WARN_DB else "\u2705"
+        parts.append(f"balance={balance:.1f}dB {bal_sym}")
+    return f"[{mins:02d}:{secs:02d}] " + " | ".join(parts)
+
+
+def _check_silent_mics(
+    stats: list[dict[str, float]],
+    mics: list[int],
+    labels: list[str],
+    warned: set[int],
+) -> set[int]:
+    """Warn on stderr for any mic whose RMS is below the silence threshold.
+
+    Each mic is warned at most once per call cycle.  Pass the returned set
+    back on the next call to suppress duplicate warnings.
+
+    Args:
+        stats: Per-mic stats dicts from :func:`_mic_stats_from_chunks`.
+        mics: Ordered mic numbers.
+        labels: Per-mic hardware labels, same length as *mics*.
+        warned: Set of mic numbers already warned in this session.
+
+    Returns:
+        Updated set that includes any newly warned mic numbers.
+    """
+    new_warned = set(warned)
+    for mic_stats, m, lbl in zip(stats, mics, labels, strict=True):
+        if mic_stats["rms"] < _SILENCE_THRESHOLD_DBFS and m not in warned:
+            print(
+                f"\u26a0\ufe0f  mic{m} ({lbl}): no signal detected "
+                f"(rms={mic_stats['rms']:.1f} dBFS) \u2014 is it turned on?",
+                file=sys.stderr,
+            )
+            new_warned.add(m)
+    return new_warned
+
+
+def _print_session_summary(
+    stats: list[dict[str, float]],
+    mics: list[int],
+    labels: list[str],
+) -> None:
+    """Print a full-session per-mic level summary and balance check.
+
+    Called after all WAV files have been written, using stats computed from
+    the complete session audio.
+
+    Args:
+        stats: Per-mic stats dicts from :func:`_mic_stats_from_chunks`.
+        mics: Ordered mic numbers.
+        labels: Per-mic hardware labels, same length as *mics*.
+    """
+    print("\n--- Recording summary ---")
+    for mic_stats, m, lbl in zip(stats, mics, labels, strict=True):
+        flags = ""
+        if mic_stats["peak"] >= -0.5:
+            flags = "  \u26a0\ufe0f  CLIPPING"
+        elif mic_stats["peak"] < -30.0:
+            flags = "  \u26a0\ufe0f  TOO QUIET"
+        print(
+            f"  mic{m} ({lbl:<14s}): "
+            f"peak={mic_stats['peak']:+6.1f} dBFS  "
+            f"rms={mic_stats['rms']:+6.1f} dBFS{flags}"
+        )
+    if len(stats) >= 2:
+        rms_vals = [s["rms"] for s in stats]
+        balance = max(rms_vals) - min(rms_vals)
+        unbalanced = "\u26a0\ufe0f  UNBALANCED (>6dB)"
+        bal_sym = unbalanced if balance > _BALANCE_WARN_DB else "\u2705 balanced"
+        print(f"  Balance: {balance:.1f} dB  {bal_sym}")
+
 
 # ---------------------------------------------------------------------------
 # Config helpers
@@ -237,6 +401,11 @@ def cmd_record(args: argparse.Namespace) -> None:
     recorded_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     start = time.monotonic()
 
+    # Live monitoring state
+    silence_warned: set[int] = set()  # mic numbers already warned about silence
+    silence_checked = False  # True once the initial 5-second silence check has run
+    heartbeat_chunk_offset = 0  # chunk count at the previous heartbeat (for windowing)
+
     # Rate-limit status warnings to avoid flooding stderr on transient glitches.
     _status_warn_interval = 5.0
     _last_status_warn: float = 0.0
@@ -266,13 +435,36 @@ def cmd_record(args: argparse.Namespace) -> None:
             next_heartbeat = start + 30.0
             while True:
                 time.sleep(0.25)
-                if not args.quiet:
-                    now = time.monotonic()
-                    if now >= next_heartbeat:
-                        elapsed = now - start
-                        mins, secs = divmod(int(elapsed), 60)
-                        print(f"[{mins:02d}:{secs:02d}] Recording...")
-                        next_heartbeat = now + 30.0
+                now = time.monotonic()
+                elapsed = now - start
+
+                # Initial silence check after _SILENCE_CHECK_AFTER_SEC seconds.
+                # Fires once regardless of --quiet so the warning always reaches stderr.
+                if not silence_checked and elapsed >= _SILENCE_CHECK_AFTER_SEC:
+                    with lock:
+                        init_chunks = list(chunks)
+                    if init_chunks:
+                        init_stats = _mic_stats_from_chunks(init_chunks, mics, gains)
+                        silence_warned = _check_silent_mics(
+                            init_stats, mics, labels, silence_warned
+                        )
+                    silence_checked = True
+
+                # 30-second heartbeat: live stats + silence re-check.
+                if now >= next_heartbeat:
+                    with lock:
+                        current_chunks = list(chunks)
+                    chunk_offset = heartbeat_chunk_offset
+                    heartbeat_chunk_offset = len(current_chunks)
+
+                    hb_stats = _mic_stats_from_chunks(
+                        current_chunks, mics, gains, start_chunk=chunk_offset
+                    )
+                    # Re-check for silent mics on each heartbeat (always, even --quiet)
+                    silence_warned = _check_silent_mics(hb_stats, mics, labels, silence_warned)
+                    if not args.quiet:
+                        print(_format_heartbeat(elapsed, hb_stats, mics, labels))
+                    next_heartbeat = now + 30.0
     except KeyboardInterrupt:
         pass
 
@@ -331,6 +523,11 @@ def cmd_record(args: argparse.Namespace) -> None:
         json.dump(session_data, f, indent=2)
         f.write("\n")
     print(f"  Wrote {session_filename}")
+
+    # Full-session level summary
+    summary_stats = _mic_stats_from_chunks([recording], mics, gains)
+    _print_session_summary(summary_stats, mics, labels)
+
     n = len(mics)
     print(f"\nDone. {audio_duration:.1f}s audio -> {n} WAV(s) + session JSON in {output_dir}")
 

@@ -29,7 +29,12 @@ python scripts/record_mics.py record \
 Replace `{{bean-origin}}` with a lowercase slug (e.g. `panama-hortigal-estate`, `brazil-santos`) and `{{N}}` with the next roast number for that origin. Device, sample rate (44100 Hz), mic labels, and gains are resolved from `configs/default.yaml` automatically.
 
 **3. Monitor**
-- Heartbeat prints every 30 seconds: `[MM:SS] Recording...`
+- After ~5 seconds, a silent-mic check runs automatically. If a mic has no signal it prints to stderr: `⚠️  mic2 (audiotechnica): no signal detected — is it turned on?`
+- Heartbeat every 30 seconds shows per-mic peak/RMS and balance for the last 30s window:
+  ```
+  [MM:SS] mic1(fifine): peak=-19.2 rms=-37.1 dBFS | mic2(audiotechnica): peak=-21.8 rms=-43.9 dBFS | balance=6.8dB ✅
+  ```
+  Balance warning (⚠️) fires when RMS difference between mics exceeds 6 dB.
 - Audio status warnings (buffer overruns) go to stderr, rate-limited to every 5s
 - The user presses **Ctrl-C** to stop — do NOT stop it programmatically
 
@@ -38,6 +43,14 @@ Replace `{{bean-origin}}` with a lowercase slug (e.g. `panama-hortigal-estate`, 
 - Session JSON: `{origin}-roast{N}-session.json`
 - `_partial` suffix if duration < 60s (aborted/test session)
 - Files land in `data/raw/` by default
+- A full-session level summary is printed after the files are written:
+  ```
+  --- Recording summary ---
+    mic1 (fifine        ):  peak= -17.2 dBFS   rms= -36.1 dBFS
+    mic2 (audiotechnica ):  peak= -21.3 dBFS   rms= -44.0 dBFS
+    Balance: 7.9 dB  ⚠️  UNBALANCED (>6dB)
+  ```
+  Use this to judge whether gain adjustments are needed before the next roast.
 
 ### Custom options
 
