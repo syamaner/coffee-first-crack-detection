@@ -109,12 +109,21 @@ Only the `first_crack` label is needed. Everything outside annotated regions is 
 
 ```bash
 python -m coffee_first_crack.data_prep.convert_labelstudio_export \
-  --input data/labels/project-1-at-YYYY-MM-DD.json \
+  --input data/labels/project-1-at-2026-04-12-19-41-e5863e6e.json \
   --output data/labels \
   --data-root data/raw
 ```
 
 This produces one `{stem}.json` annotation file per audio file in `data/labels/`.
+
+**Multi-mic recordings:** Only mic1 needs to be annotated in Label Studio (both mics are sample-locked, so timestamps are identical). After converting, propagate annotations to the paired mic2 files:
+
+```bash
+python scripts/propagate_annotations.py --dry-run   # preview
+python scripts/propagate_annotations.py              # create mic2 annotation JSONs
+```
+
+See `docs/multi_mic_setup.md` for the full paired-recording workflow.
 
 ---
 
@@ -184,10 +193,14 @@ This auto-parses filenames to extract microphone and coffee origin metadata.
 
 | Format | Example | Notes |
 |--------|---------|-------|
-| New (mic-2) | `mic2-brazil-roast1-03-04-26.wav` | Parser extracts mic=mic-2-new, origin=brazil |
-| New (mic-2) | `mic2-costarica-hermosa-roast1.wav` | Multi-word origins use hyphens |
+| Multi-mic (mic-1) | `mic1-panama-hortigal-estate-roast1.wav` | Recorded simultaneously with mic-2; separate hardware |
+| Multi-mic (mic-2) | `mic2-panama-hortigal-estate-roast1.wav` | Recorded simultaneously with mic-1; separate hardware |
+| Single mic (mic-2) | `mic2-brazil-roast1-21-02-26-10-37.wav` | Parser extracts mic=mic-2-new, origin=brazil |
+| Single mic (mic-2) | `mic2-brazil-santos-roast1-04-04-26-17-52.wav` | Multi-word origins use hyphens |
 | Legacy (mic-1) | `roast-1-costarica-hermosa-hp-a.wav` | Handled by legacy mapping table |
-| Legacy (mic-1) | `roast1-19-10-2025-brazil.wav` | Handled by legacy mapping table |
+| Legacy (mic-1) | `25-10-19_1103-costarica-hermosa-5.alog.wav` | Handled by legacy mapping table |
+
+When recording with two microphones, each mic produces an independent WAV file. Both are annotated (annotations can be propagated via `scripts/propagate_annotations.py`) and treated as separate recordings for splitting.
 
 ---
 
@@ -195,9 +208,13 @@ This auto-parses filenames to extract microphone and coffee origin metadata.
 
 | Source | Mic | Origin | Files | Status |
 |--------|-----|--------|-------|--------|
-| Original prototype | mic-1-original | costarica-hermosa | 4 roasts | ⏳ Re-annotate with single-region approach |
-| Original prototype | mic-1-original | brazil | 5 roasts | ⏳ Re-annotate with single-region approach |
-| New recordings | mic-2-new | brazil | 4 roasts | ⏳ Pending annotation |
-| New recordings | mic-2-new | brazil-santos | 2 roasts | ⏳ Pending annotation |
+| Legacy prototype | mic-1-original | costarica-hermosa | 4 roasts | ✅ Annotated |
+| Legacy prototype | mic-1-original | brazil | 5 roasts | ✅ Annotated |
+| Single-mic recordings | mic-2-new | brazil | 4 roasts | ✅ Annotated |
+| Single-mic recordings | mic-2-new | brazil-santos | 2 roasts | ✅ Annotated |
+| Multi-mic recordings | mic-1-new (fifine) | panama-hortigal-estate | 3 roasts | ✅ Annotated |
+| Multi-mic recordings | mic-2-new (audio-technica) | panama-hortigal-estate | 3 roasts | ✅ Annotated |
 
-> All 15 files should be annotated with the single-region approach (one `first_crack` region per roast). Then run Steps 3–6 to produce the full dataset.
+**Totals**: 21 recordings → 1,435 chunks (223 first_crack / 1,212 no_first_crack)
+
+> When adding new recordings, re-run Steps 3–6 to rebuild the full dataset (the chunker and splitter process all annotation files in `data/labels/`).

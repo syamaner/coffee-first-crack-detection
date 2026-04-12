@@ -222,3 +222,4 @@ runs/
 docs/notes.md
 docs/posts/**/*
 **/.DS_Store
+data/labels/bak/**/*

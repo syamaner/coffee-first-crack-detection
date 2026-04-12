@@ -95,7 +95,7 @@ python -c "import sounddevice as sd; print(sd.query_devices())"
 ### ONNX Export (for Raspberry Pi 5)
 ```bash
 python -m coffee_first_crack.export_onnx \
-  --model-dir experiments/baseline_v1/checkpoint-best \
+  --model-dir experiments/baseline_v5/checkpoint-best \
   --output-dir exports/onnx --quantize --benchmark
 ```
 
@@ -118,14 +118,14 @@ python scripts/benchmark_onnx_pi.py \
 ### Benchmark (PyTorch + ONNX, Mac/GPU only)
 ```bash
 python scripts/benchmark_platforms.py \
-  --model-dir experiments/baseline_v1/checkpoint-best \
+  --model-dir experiments/baseline_v5/checkpoint-best \
   --onnx-dir exports/onnx
 ```
 
 ### Push to HuggingFace Hub
 ```bash
 python scripts/push_to_hub.py \
-  --model-dir experiments/baseline_v1/checkpoint-best \
+  --model-dir experiments/baseline_v5/checkpoint-best \
   --repo-id syamaner/coffee-first-crack-detection
 ```
 
@@ -166,6 +166,7 @@ scripts/
   benchmark_onnx_pi.py — ONNX-only latency benchmark (dummy audio, no I/O variance)
   benchmark_platforms.py — PyTorch + ONNX benchmark (Mac/GPU only)
   push_to_hub.py       — publish model + dataset to HuggingFace Hub
+  rebuild_and_train.sh — full pipeline: clean → chunk → split → train → eval
 ```
 
 **Key design decisions:**
@@ -178,6 +179,8 @@ scripts/
 
 **Pointers to key docs:**
 - Data pipeline step-by-step: `docs/data_preparation.md`
+- Hyperparameter tuning history: `docs/hyperparameter_tuning.md`
+- Multi-mic hardware setup: `docs/multi_mic_setup.md`
 - Epic progress: `docs/state/epics/coffee-first-crack-detection.md`
 - Epic registry: `docs/state/registry.md`
 - HuggingFace model: https://huggingface.co/syamaner/coffee-first-crack-detection

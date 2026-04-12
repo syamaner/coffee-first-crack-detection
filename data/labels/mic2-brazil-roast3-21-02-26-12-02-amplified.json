@@ -1,12 +1,12 @@
 {
-  "audio_file": "mic2-brazil-roast3-21-02-26-12-02.wav",
+  "audio_file": "mic2-brazil-roast3-21-02-26-12-02-amplified.wav",
   "duration": 751.453492063492,
   "sample_rate": 44100,
   "annotations": [
     {
       "id": "chunk_000",
-      "start_time": 619.2631130172106,
-      "end_time": 732.983778424291,
+      "start_time": 639.4810717759494,
+      "end_time": 734.0689427814809,
       "label": "first_crack",
       "confidence": "high"
     }

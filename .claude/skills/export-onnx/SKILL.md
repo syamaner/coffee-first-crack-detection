@@ -12,7 +12,7 @@ Target: Raspberry Pi 5 (ARM64, 16GB RAM, CPU-only inference via ONNX Runtime).
 **1. Export FP32 + INT8 ONNX**
 ```bash
 python -m coffee_first_crack.export_onnx \
-  --model-dir experiments/baseline_v1/checkpoint-best \
+  --model-dir experiments/baseline_v5/checkpoint-best \
   --output-dir exports/onnx \
   --quantize
 ```
@@ -39,7 +39,7 @@ print('Output shape:', out[0].shape)  # expect (1, 2)
 **3. Run platform benchmark**
 ```bash
 python scripts/benchmark_platforms.py \
-  --model-dir experiments/baseline_v1/checkpoint-best \
+  --model-dir experiments/baseline_v5/checkpoint-best \
   --onnx-dir exports/onnx
 ```
 

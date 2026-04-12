@@ -21,7 +21,7 @@ huggingface-cli whoami
 **2. Push model**
 ```bash
 python scripts/push_to_hub.py \
-  --model-dir experiments/baseline_v1/checkpoint-best \
+  --model-dir experiments/baseline_v5/checkpoint-best \
   --repo-id syamaner/coffee-first-crack-detection
 ```
 

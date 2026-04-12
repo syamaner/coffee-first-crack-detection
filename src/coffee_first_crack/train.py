@@ -223,6 +223,24 @@ def train(
     experiment_dir = Path("experiments") / experiment_name
     experiment_dir.mkdir(parents=True, exist_ok=True)
 
+    # Data augmentation — random amplitude scaling + Gaussian noise.
+    # Prevents the model from memorising exact waveform amplitudes.
+    # Wide amplitude range (0.7–1.3) simulates mic gain variation across
+    # recordings — avoids needing post-hoc amplification for quieter mics.
+    def train_transform(waveform: torch.Tensor) -> torch.Tensor:
+        # Random amplitude scaling (±30% volume change)
+        if torch.rand(1).item() < 0.5:
+            scale = torch.empty(1).uniform_(0.7, 1.3).item()
+            waveform = waveform * scale
+
+        # Random Gaussian noise injection
+        if torch.rand(1).item() < 0.5:
+            noise_amp = torch.empty(1).uniform_(0.001, 0.005).item()
+            noise = torch.randn_like(waveform) * noise_amp
+            waveform = waveform + noise
+
+        return waveform
+
     # Datasets
     print("Loading datasets...")
     train_base = FirstCrackDataset(
@@ -230,6 +248,7 @@ def train(
         sample_rate=ac["sample_rate"],
         target_length=ac["target_length_sec"],
         crop_mode=tc["train_crop_mode"],
+        transform=train_transform,
     )
     val_base = FirstCrackDataset(
         val_dir,
@@ -259,6 +278,27 @@ def train(
     # Model
     print(f"\nLoading base model: {DEFAULT_BASE_MODEL}")
     model = build_model(device=device)
+
+    # Partial backbone freeze — freeze early AST layers, unfreeze the last 2
+    # transformer layers + final layernorm + classifier head.
+    # Full fine-tuning (86M params) on ~900 chunks overfits by epoch 3.
+    # Fully frozen backbone (3K trainable) underfits — AudioSet features don't
+    # map cleanly to coffee-crack sounds without some domain adaptation.
+    for param in model.audio_spectrogram_transformer.parameters():
+        param.requires_grad = False
+
+    # Unfreeze last 2 transformer layers for domain adaptation
+    for param in model.audio_spectrogram_transformer.encoder.layer[-2:].parameters():
+        param.requires_grad = True
+
+    # Unfreeze final layernorm
+    for param in model.audio_spectrogram_transformer.layernorm.parameters():
+        param.requires_grad = True
+
+    frozen_count = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+    trainable_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Frozen: {frozen_count:,} params")
+    print(f"Trainable (last 2 layers + layernorm + head): {trainable_count:,} params")
 
     feature_extractor = build_feature_extractor()
 
