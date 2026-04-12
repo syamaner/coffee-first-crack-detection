@@ -177,6 +177,37 @@ def _check_silent_mics(
     return new_warned
 
 
+def _run_initial_silence_check(
+    chunks: list[np.ndarray],
+    mics: list[int],
+    labels: list[str],
+    gains: list[float],
+    warned: set[int],
+) -> tuple[set[int], bool]:
+    """Run the initial silence check once audio has arrived.
+
+    The recorder starts the check timer when the stream opens, but CoreAudio can
+    take a moment to deliver the first callback. When no audio has been captured
+    yet, keep retrying on the next loop iteration instead of permanently marking
+    the check complete.
+
+    Args:
+        chunks: Captured multi-channel audio chunks so far.
+        mics: Ordered mic numbers.
+        labels: Per-mic hardware labels, same length as *mics*.
+        gains: Per-mic digital gain multipliers, same length as *mics*.
+        warned: Set of mic numbers already warned in this session.
+
+    Returns:
+        Tuple of ``(updated_warned, completed)``. ``completed`` is ``True`` only
+        after at least one chunk was available and silence stats were computed.
+    """
+    if not chunks:
+        return set(warned), False
+    init_stats = _mic_stats_from_chunks(chunks, mics, gains)
+    return _check_silent_mics(init_stats, mics, labels, warned), True
+
+
 def _print_session_summary(
     stats: list[dict[str, float]],
     mics: list[int],
@@ -443,12 +474,9 @@ def cmd_record(args: argparse.Namespace) -> None:
                 if not silence_checked and elapsed >= _SILENCE_CHECK_AFTER_SEC:
                     with lock:
                         init_chunks = list(chunks)
-                    if init_chunks:
-                        init_stats = _mic_stats_from_chunks(init_chunks, mics, gains)
-                        silence_warned = _check_silent_mics(
-                            init_stats, mics, labels, silence_warned
-                        )
-                    silence_checked = True
+                    silence_warned, silence_checked = _run_initial_silence_check(
+                        init_chunks, mics, labels, gains, silence_warned
+                    )
 
                 # 30-second heartbeat: live stats + silence re-check.
                 if now >= next_heartbeat:

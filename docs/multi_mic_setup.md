@@ -71,7 +71,7 @@ In Audio MIDI Setup → select **ATR2100x-USB Microphone** (the individual devic
 not RoastMics):
 
 - **Front Left**: `20.1 dB` (value `0.885`)
-- **Front Right**: `20.1 dB` (value `0.889`) — keep matched to Front Left
+- **Front Right**: `20.1 dB` (value `0.885`) — keep matched to Front Left
 
 > **Rule:** hardware-first gain is always preferred. If the FIFINE is clipping,
 > turn the physical knob down — don't touch the software slider.

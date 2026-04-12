@@ -268,6 +268,43 @@ class TestCheckSilentMics:
 
 
 # ---------------------------------------------------------------------------
+# _run_initial_silence_check
+# ---------------------------------------------------------------------------
+
+
+class TestRunInitialSilenceCheck:
+    """Tests for _run_initial_silence_check."""
+
+    def test_empty_chunks_keeps_retrying(self) -> None:
+        """No audio yet should leave the check incomplete and warnings unchanged."""
+        warned, completed = rm._run_initial_silence_check(
+            chunks=[],
+            mics=[1],
+            labels=["fifine"],
+            gains=[1.0],
+            warned={2},
+        )
+        assert warned == {2}
+        assert completed is False
+
+    def test_available_audio_completes_check(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Captured audio should run the check and mark it complete."""
+        silent = np.zeros(SR, dtype=np.float32)
+        chunks = _stereo_chunks(silent, silent)
+        warned, completed = rm._run_initial_silence_check(
+            chunks=chunks,
+            mics=[1],
+            labels=["fifine"],
+            gains=[1.0],
+            warned=set(),
+        )
+        captured = capsys.readouterr()
+        assert "mic1" in captured.err
+        assert 1 in warned
+        assert completed is True
+
+
+# ---------------------------------------------------------------------------
 # _print_session_summary
 # ---------------------------------------------------------------------------
 
