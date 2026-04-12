@@ -70,8 +70,8 @@ _DESCRIPTION = """\
 Upload a **10-second** coffee roasting audio clip to check for **first crack** \
 — the critical moment when beans begin to pop.
 
-The model is an Audio Spectrogram Transformer (AST) fine-tuned on 973 labelled \
-10-second chunks from 15 roast recordings (97.4% test accuracy, 100% precision).
+The model is an Audio Spectrogram Transformer (AST) fine-tuned on 1,435 labelled \
+10-second chunks from 21 roast recordings (97.7% test accuracy, 97.6% first-crack recall).
 
 > **Note**: designed for 10-second windows. The feature extractor internally\
  truncates longer clips at the spectrogram level — for best results upload a\
