@@ -20,9 +20,12 @@ class defaults that are *not* stored in that json (validated 1 Jul 2026).
 Numeric equivalence guarantee
 ------------------------------
 On a 10 s / 16 kHz mono window the maximum absolute difference between
-:meth:`MelFrontend.extract` and the ``ASTFeatureExtractor`` numpy path is
-< 1 × 10⁻⁵ (< 6 × 10⁻⁶ in practice) — float32 rounding only.  A numeric-diff
-test in ``tests/test_mel_frontend.py`` asserts this bound.
+:meth:`MelFrontend.extract` and the ``ASTFeatureExtractor`` numpy path
+(``is_speech_available()`` forced False) is ~2.71 × 10⁻⁵ across 303 test
+WAVs — within the ~7.8 × 10⁻⁵ intrinsic variance between ASTFeatureExtractor's
+own torchaudio and numpy paths.  A numeric-diff test in
+``tests/test_mel_frontend.py`` asserts this bound (tolerance 1 × 10⁻⁴, ~3.7×
+headroom).
 
 Usage::
 
@@ -74,20 +77,6 @@ def _hz_to_mel_kaldi(freq: float | np.ndarray) -> float | np.ndarray:
         Mel value(s) corresponding to ``freq``.
     """
     return 1127.0 * np.log(1.0 + freq / 700.0)  # type: ignore[return-value]
-
-
-def _mel_to_hz_kaldi(mel: float | np.ndarray) -> float | np.ndarray:
-    """Convert mel to Hz using the Kaldi formula.
-
-    Accepts a scalar or a numpy array (vectorised).
-
-    Args:
-        mel: Mel value(s).
-
-    Returns:
-        Frequency value(s) in Hz.
-    """
-    return 700.0 * (np.exp(mel / 1127.0) - 1.0)  # type: ignore[return-value]
 
 
 def _build_kaldi_mel_filters(
@@ -192,11 +181,13 @@ def extract_mel(
         Float32 array of shape ``(max_length, num_mel_filters)`` — un-normalised
         log-mel spectrogram.
     """
-    waveform = np.asarray(waveform, dtype=np.float32)
+    # Work in float64 through the pipeline for numerical fidelity with the
+    # reference ASTFeatureExtractor numpy path; cast to float32 at the end.
+    waveform = np.asarray(waveform, dtype=np.float64)
     n_frames = 1 + (len(waveform) - frame_length) // hop_length
 
     # Frame the signal (no centre-padding — center=False matches AST)
-    frames = np.zeros((n_frames, frame_length), dtype=np.float32)
+    frames = np.zeros((n_frames, frame_length), dtype=np.float64)
     for i in range(n_frames):
         start = i * hop_length
         frames[i] = waveform[start : start + frame_length]
@@ -204,18 +195,19 @@ def extract_mel(
     # DC offset removal per frame
     frames -= frames.mean(axis=1, keepdims=True)
 
-    # Preemphasis per frame: y[t] = x[t] - coeff * x[t-1]
+    # Preemphasis per frame: y[0] = x[0] * (1 - coeff); y[t] = x[t] - coeff * x[t-1]
     frames[:, 1:] -= preemphasis * frames[:, :-1]
+    frames[:, 0] *= 1.0 - preemphasis
 
-    # Apply symmetric Hann window
-    frames *= window[np.newaxis, :]
+    # Apply symmetric Hann window (promote to float64 for consistent accumulation)
+    frames *= window[np.newaxis, :].astype(np.float64)
 
-    # FFT → power spectrum (magnitude squared)
+    # FFT → power spectrum (magnitude squared), accumulated in float64
     fft_out = np.fft.rfft(frames, n=fft_length, axis=1)
-    power = (fft_out.real**2 + fft_out.imag**2).astype(np.float32)
+    power = fft_out.real**2 + fft_out.imag**2  # float64
 
-    # Kaldi mel filterbank → floor → natural log
-    mel_spec = np.dot(power, mel_filters)
+    # Kaldi mel filterbank → floor → natural log (all float64); cast at output
+    mel_spec = np.dot(power, mel_filters.astype(np.float64))
     mel_spec = np.maximum(mel_spec, mel_floor)
     log_mel = np.log(mel_spec).astype(np.float32)
 
@@ -307,9 +299,18 @@ class MelFrontend:
         with config_path.open() as fh:
             cfg = json.load(fh)
 
+        try:
+            mean = float(cfg["mean"])
+            std = float(cfg["std"])
+        except KeyError as exc:
+            raise KeyError(
+                f"preprocessor_config.json in {config_dir} is missing required key {exc}. "
+                "Expected keys: 'mean', 'std'."
+            ) from exc
+
         return cls(
-            mean=float(cfg["mean"]),
-            std=float(cfg["std"]),
+            mean=mean,
+            std=std,
             num_mel_bins=int(cfg.get("num_mel_bins", 128)),
             sampling_rate=int(cfg.get("sampling_rate", 16000)),
             max_length=int(cfg.get("max_length", 1024)),

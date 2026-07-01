@@ -27,42 +27,15 @@ import sys
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
-from datetime import timedelta
 from pathlib import Path
-from typing import Optional, Union
 
 import librosa
 import numpy as np
 import torch
 
+from coffee_first_crack.events import DetectionEvent, _format_time
 from coffee_first_crack.model import FirstCrackClassifier
 from coffee_first_crack.utils.device import get_device
-
-
-# ── Detection event ───────────────────────────────────────────────────────────
-
-
-@dataclass
-class DetectionEvent:
-    """A confirmed first-crack detection event.
-
-    Attributes:
-        timestamp_sec: Time (in seconds) of first confirmed pop.
-        timestamp_str: Human-readable ``"MM:SS"`` string.
-        confidence: Number of positive pops within the confirmation window.
-    """
-
-    timestamp_sec: float
-    timestamp_str: str
-    confidence: int
-
-
-def _format_time(seconds: float) -> str:
-    """Format seconds as ``MM:SS``."""
-    total = int(seconds)
-    return f"{total // 60:02d}:{total % 60:02d}"
-
 
 # ── Sliding window (offline) ──────────────────────────────────────────────────
 
@@ -106,7 +79,7 @@ class SlidingWindowInference:
         )
         self._model.model.eval()
 
-    def process_file(self, audio_path: Union[str, Path]) -> list[DetectionEvent]:
+    def process_file(self, audio_path: str | Path) -> list[DetectionEvent]:
         """Process an audio file and return confirmed detection events.
 
         Args:
@@ -135,15 +108,11 @@ class SlidingWindowInference:
 
             # Count pops within confirmation window
             cutoff = current_time - self.confirmation_window
-            recent_positives = sum(
-                1 for t, pos, _ in history if t >= cutoff and pos
-            )
+            recent_positives = sum(1 for t, pos, _ in history if t >= cutoff and pos)
 
             if not confirmed and recent_positives >= self.min_pops:
                 confirmed = True
-                first_t = next(
-                    t for t, pos, _ in history if pos and t >= cutoff
-                )
+                first_t = next(t for t, pos, _ in history if pos and t >= cutoff)
                 event = DetectionEvent(
                     timestamp_sec=first_t,
                     timestamp_str=_format_time(first_t),
@@ -167,7 +136,7 @@ class SlidingWindowInference:
 
         Applies an energy-based noise gate: silent windows return 0.0.
         """
-        if np.sqrt(np.mean(window ** 2)) < 0.01:
+        if np.sqrt(np.mean(window**2)) < 0.01:
             return 0.0
         tensor = torch.FloatTensor(window).unsqueeze(0)
         logits = self._model(tensor)
@@ -198,9 +167,9 @@ class FirstCrackDetector:
 
     def __init__(
         self,
-        audio_file: Optional[Union[str, Path]] = None,
+        audio_file: str | Path | None = None,
         use_microphone: bool = False,
-        device_index: Optional[int] = None,
+        device_index: int | None = None,
         model_name_or_path: str = "syamaner/coffee-first-crack-detection",
         window_size: float = 10.0,
         overlap: float = 0.7,
@@ -236,11 +205,11 @@ class FirstCrackDetector:
 
         # State
         self._running = False
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._first_crack_detected = False
-        self._first_crack_time: Optional[float] = None
-        self._start_time: Optional[float] = None
+        self._first_crack_time: float | None = None
+        self._start_time: float | None = None
         self._audio_buffer: deque = deque(maxlen=int(sample_rate * 60))
         self._detection_history: deque = deque(maxlen=200)
 
@@ -270,7 +239,7 @@ class FirstCrackDetector:
         self._detection_history.clear()
         print("First crack detector stopped.")
 
-    def is_first_crack(self) -> Union[bool, tuple[bool, str]]:
+    def is_first_crack(self) -> bool | tuple[bool, str]:
         """Check detection state.
 
         Returns:
@@ -281,7 +250,7 @@ class FirstCrackDetector:
                 return False
             return True, _format_time(self._first_crack_time or 0.0)
 
-    def get_elapsed_time(self) -> Optional[str]:
+    def get_elapsed_time(self) -> str | None:
         """Return elapsed time since :meth:`start` as ``"MM:SS"``."""
         if self._start_time is None:
             return None
@@ -337,7 +306,7 @@ class FirstCrackDetector:
                         buf_size = len(self._audio_buffer)
                     if buf_size >= self.window_samples:
                         with self._lock:
-                            window = np.array(list(self._audio_buffer)[-self.window_samples:])
+                            window = np.array(list(self._audio_buffer)[-self.window_samples :])
                         current_time = time.time() - (self._start_time or time.time())
                         prob = self._predict_window(window)
                         self._update_state(prob, current_time)
@@ -349,7 +318,7 @@ class FirstCrackDetector:
     @torch.inference_mode()
     def _predict_window(self, window: np.ndarray) -> float:
         """Predict first-crack probability with noise gate."""
-        if np.sqrt(np.mean(window ** 2)) < 0.01:
+        if np.sqrt(np.mean(window**2)) < 0.01:
             return 0.0
         tensor = torch.FloatTensor(window).unsqueeze(0)
         logits = self._model(tensor)
@@ -387,7 +356,9 @@ def main() -> None:
     group.add_argument("--audio", type=Path, help="Path to audio file")
     group.add_argument("--microphone", action="store_true", help="Use live microphone")
     parser.add_argument(
-        "--model-dir", type=str, default="syamaner/coffee-first-crack-detection",
+        "--model-dir",
+        type=str,
+        default="syamaner/coffee-first-crack-detection",
         help="HuggingFace model ID or local checkpoint directory",
     )
     parser.add_argument("--device-index", type=int, default=None, help="Microphone device index")

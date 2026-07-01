@@ -42,7 +42,7 @@ import librosa
 import numpy as np
 import yaml
 
-from coffee_first_crack.inference import DetectionEvent, _format_time
+from coffee_first_crack.events import DetectionEvent, _format_time
 from coffee_first_crack.mel_frontend import MelFrontend
 
 if TYPE_CHECKING:

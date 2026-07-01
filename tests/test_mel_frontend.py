@@ -1,10 +1,10 @@
 """Tests for coffee_first_crack.mel_frontend.
 
 The keystone test is ``test_numeric_mel_diff_vs_ast``: it feeds the same WAV
-window through the reference ``ASTFeatureExtractor`` (numpy/torchaudio path) and
-through :class:`MelFrontend` and asserts the absolute difference is below
-a tight tolerance.  This is the numeric equivalence guarantee that validates the
-torch-free swap.
+window through the reference ``ASTFeatureExtractor`` (numpy path, forced via
+monkeypatch) and through :class:`MelFrontend` and asserts the absolute
+difference is below the tolerance for all test WAVs.  This is the numeric
+equivalence guarantee that validates the torch-free swap.
 
 Other tests cover the factory seam, normalisation formula, and the call interface
 so the module behaves as a drop-in replacement for ``ASTFeatureExtractor``.
@@ -13,6 +13,7 @@ so the module behaves as a drop-in replacement for ``ASTFeatureExtractor``.
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -22,6 +23,12 @@ from coffee_first_crack.mel_frontend import (
     _build_kaldi_mel_filters,
     _hann_window_symmetric,
     extract_mel,
+)
+
+# Module path to monkeypatch for forcing the ASTFeatureExtractor numpy path
+_AST_MOD = (
+    "transformers.models.audio_spectrogram_transformer"
+    ".feature_extraction_audio_spectrogram_transformer"
 )
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -34,13 +41,12 @@ _CONFIG_AVAILABLE = _CONFIG_DIR.is_dir() and (_CONFIG_DIR / "preprocessor_config
 _TEST_DATA_AVAILABLE = _TEST_SPLIT.is_dir()
 
 
-def _first_wav(subdir: str) -> Path | None:
-    """Return the first WAV file in a test subdirectory, or None if absent."""
+def _all_wavs(subdir: str) -> list[Path]:
+    """Return all WAV files in a test subdirectory, sorted."""
     d = _TEST_SPLIT / subdir
     if not d.is_dir():
-        return None
-    wavs = sorted(d.glob("*.wav"))
-    return wavs[0] if wavs else None
+        return []
+    return sorted(d.glob("*.wav"))
 
 
 # ── Kaldi mel filter bank ─────────────────────────────────────────────────────
@@ -219,8 +225,11 @@ def test_normalisation_formula() -> None:
 # ── Numeric mel-diff vs ASTFeatureExtractor (KEYSTONE) ───────────────────────
 
 # Tolerance: max absolute difference between MelFrontend and the
-# ASTFeatureExtractor numpy path on a 10 s audio window.  Empirically measured
-# at < 1.3e-05; gate is set to 1e-04 with 7× headroom.
+# ASTFeatureExtractor *numpy path* (forced via monkeypatch) across all test
+# WAVs.  Empirically measured at ~2.71e-05 after the preemphasis sample-0 fix
+# and float64 accumulation; gate is 1e-04 with ~3.7× headroom.
+# This is also within the ~7.8e-05 intrinsic variance between ASTFeatureExtractor's
+# own torchaudio and numpy paths.
 _MEL_DIFF_ATOL: float = 1e-04
 
 
@@ -229,38 +238,42 @@ _MEL_DIFF_ATOL: float = 1e-04
     reason="exports/onnx/int8 or data/splits/test not present",
 )
 def test_numeric_mel_diff_vs_ast() -> None:
-    """MelFrontend input_values must match ASTFeatureExtractor to < 1e-04.
+    """MelFrontend input_values must match ASTFeatureExtractor numpy path to < 1e-04.
 
     This is the keystone numeric equivalence test for D27 Phase 1.  It confirms
     the numpy/scipy Kaldi-compatible mel front-end produces the same features the
     ONNX model was trained on (via the ASTFeatureExtractor numpy path).
+
+    ``is_speech_available`` is monkeypatched to False to guarantee the
+    ASTFeatureExtractor takes the numpy spectrogram path regardless of whether
+    torchaudio is installed in the test environment.  All WAV files in each
+    test class directory are exercised (not just the first).
     """
     pytest.importorskip("transformers")
     import librosa  # type: ignore[import-untyped]
     from transformers import ASTFeatureExtractor  # type: ignore[import-untyped]
 
-    ast_extractor = ASTFeatureExtractor.from_pretrained(str(_CONFIG_DIR))
-    our_frontend = MelFrontend.from_config(_CONFIG_DIR)
+    with patch(f"{_AST_MOD}.is_speech_available", return_value=False):
+        ast_extractor = ASTFeatureExtractor.from_pretrained(str(_CONFIG_DIR))
+        our_frontend = MelFrontend.from_config(_CONFIG_DIR)
 
-    test_wavs: list[Path] = []
-    for subdir in ("first_crack", "no_first_crack"):
-        wav = _first_wav(subdir)
-        if wav is not None:
-            test_wavs.append(wav)
+        test_wavs: list[Path] = []
+        for subdir in ("first_crack", "no_first_crack"):
+            test_wavs.extend(_all_wavs(subdir))
 
-    assert test_wavs, "No test WAVs found — check data/splits/test/"
+        assert test_wavs, "No test WAVs found — check data/splits/test/"
 
-    for wav_path in test_wavs:
-        audio, _ = librosa.load(str(wav_path), sr=16000, mono=True)
-        window = audio[:160000]
+        for wav_path in test_wavs:
+            audio, _ = librosa.load(str(wav_path), sr=16000, mono=True)
+            window = audio[:160000]
 
-        ast_out = ast_extractor([window.tolist()], sampling_rate=16000, return_tensors="np")
-        iv_ast = ast_out["input_values"][0]
+            ast_out = ast_extractor([window.tolist()], sampling_rate=16000, return_tensors="np")
+            iv_ast = ast_out["input_values"][0]
 
-        our_out = our_frontend([window.tolist()], sampling_rate=16000, return_tensors="np")
-        iv_our = our_out["input_values"][0]
+            our_out = our_frontend([window.tolist()], sampling_rate=16000, return_tensors="np")
+            iv_our = our_out["input_values"][0]
 
-        diff = np.abs(iv_ast - iv_our)
-        assert diff.max() < _MEL_DIFF_ATOL, (
-            f"{wav_path.name}: max abs diff {diff.max():.2e} exceeds {_MEL_DIFF_ATOL:.0e}"
-        )
+            diff = np.abs(iv_ast - iv_our)
+            assert diff.max() < _MEL_DIFF_ATOL, (
+                f"{wav_path.name}: max abs diff {diff.max():.2e} exceeds {_MEL_DIFF_ATOL:.0e}"
+            )
