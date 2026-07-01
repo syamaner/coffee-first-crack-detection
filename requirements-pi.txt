@@ -1,19 +1,22 @@
 # Raspberry Pi 5 (ARM64) — inference only
 # No CUDA, no MPS, no training dependencies
+# No torch, no transformers — replaced by a numpy/scipy Kaldi mel front-end (D27 Phase 1)
 # Install with: pip install -r requirements-pi.txt
 
 # Inference via ONNX Runtime (ARM64 wheel available)
 onnxruntime>=1.17.0  # Use onnxruntime, NOT onnxruntime-gpu
 
-# Audio I/O
+# Audio I/O: librosa (load), soundfile (decode), sounddevice (microphone)
 librosa>=0.10.0
 soundfile>=0.12.0
 sounddevice>=0.4.6
+# Mel filterbank: numpy/scipy Kaldi-compatible front-end (mel_frontend.py)
+# Reproduces ASTFeatureExtractor numpy path — replaces torch + transformers.
 numpy>=1.24.0
+scipy>=1.11.0
 
-# HuggingFace for downloading model config / tokenizer
+# HuggingFace for downloading model artifacts (preprocessor_config.json + ONNX model)
 huggingface-hub>=0.20.0
-transformers>=4.37.0
 
 # Metrics
 scikit-learn>=1.3.0
@@ -21,8 +24,3 @@ scikit-learn>=1.3.0
 # Utilities
 pyyaml>=6.0
 tqdm>=4.66.0
-
-# Note: torch CPU-only is also required for ASTFeatureExtractor filterbank
-# computation. Install separately:
-#   pip install torch --index-url https://download.pytorch.org/whl/cpu
-# Do NOT install torchaudio or optimum on RPi5 (ONNX Runtime is used for inference).

@@ -43,10 +43,10 @@ import numpy as np
 import yaml
 
 from coffee_first_crack.inference import DetectionEvent, _format_time
+from coffee_first_crack.mel_frontend import MelFrontend
 
 if TYPE_CHECKING:
     import onnxruntime as rt
-    from transformers import ASTFeatureExtractor
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -137,19 +137,27 @@ def _resolve_onnx_model(
 def _load_extractor(
     repo_id: str = _DEFAULT_REPO_ID,
     subfolder: str = _DEFAULT_SUBFOLDER,
-) -> ASTFeatureExtractor:
-    """Load the ASTFeatureExtractor from HuggingFace Hub.
+) -> MelFrontend:
+    """Download ``preprocessor_config.json`` and build a :class:`MelFrontend`.
+
+    The json is downloaded from HuggingFace Hub into the local cache, then
+    :meth:`MelFrontend.from_config` reads ``mean``/``std`` from it.
+    The file is kept in place — Phase 2 (MCP ``artifacts.py``) requires it.
 
     Args:
         repo_id: HuggingFace Hub repository ID.
         subfolder: Subfolder containing ``preprocessor_config.json``.
 
     Returns:
-        An initialised ``ASTFeatureExtractor``.
+        An initialised :class:`MelFrontend`.
     """
-    from transformers import ASTFeatureExtractor
+    from huggingface_hub import hf_hub_download
 
-    return ASTFeatureExtractor.from_pretrained(repo_id, subfolder=subfolder)
+    config_path = hf_hub_download(
+        repo_id=repo_id,
+        filename=f"{subfolder}/preprocessor_config.json",
+    )
+    return MelFrontend.from_config(Path(config_path).parent)
 
 
 def _create_session(

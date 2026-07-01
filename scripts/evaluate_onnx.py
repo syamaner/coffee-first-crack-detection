@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Evaluate an ONNX model on the test split — no PyTorch model inference dependency.
+"""Evaluate an ONNX model on the test split — no PyTorch dependency.
 
 Designed to run on Raspberry Pi 5 with ``requirements-pi.txt`` installed.
-CPU-only PyTorch is still required for ``ASTFeatureExtractor`` filterbank
-computation during feature extraction, but model inference runs through
-ONNX Runtime rather than PyTorch.  The script walks
-``data/splits/test/{first_crack,no_first_crack}/`` to infer ground-truth
-labels from directory names, runs each WAV through the ONNX model, and reports
-accuracy, F1, precision, recall, confusion matrix, and per-window latency.
+Uses the :class:`~coffee_first_crack.mel_frontend.MelFrontend` numpy/scipy
+Kaldi-compatible mel front-end; neither ``torch`` nor ``transformers`` is required.
+The script walks ``data/splits/test/{first_crack,no_first_crack}/`` to infer
+ground-truth labels from directory names, runs each WAV through the ONNX model,
+and reports accuracy, F1, precision, recall, confusion matrix, and per-window
+latency.
 
 Supports loading the model from a local directory or from HuggingFace Hub.
 
@@ -52,7 +52,8 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from transformers import ASTFeatureExtractor
+
+from coffee_first_crack.mel_frontend import MelFrontend
 
 # Canonical label mapping — must stay in sync with configs/default.yaml
 LABEL2ID: dict[str, int] = {"no_first_crack": 0, "first_crack": 1}
@@ -137,8 +138,11 @@ def _resolve_model(
     return onnx_path, extractor_source, True
 
 
-def _load_extractor(extractor_source: str, *, is_hub: bool = False) -> ASTFeatureExtractor:
-    """Load the feature extractor from a local path or HF Hub.
+def _load_extractor(extractor_source: str, *, is_hub: bool = False) -> MelFrontend:
+    """Build a :class:`~coffee_first_crack.mel_frontend.MelFrontend` from a local path or HF Hub.
+
+    Reads ``preprocessor_config.json`` to obtain ``mean``/``std``.  The file is
+    never removed — Phase 2 (MCP ``artifacts.py``) requires it.
 
     Args:
         extractor_source: Either a local directory path or
@@ -146,12 +150,20 @@ def _load_extractor(extractor_source: str, *, is_hub: bool = False) -> ASTFeatur
         is_hub: If True, parse ``extractor_source`` as ``"repo_id:subfolder"``.
 
     Returns:
-        An initialised ``ASTFeatureExtractor``.
+        An initialised :class:`~coffee_first_crack.mel_frontend.MelFrontend`.
     """
     if is_hub:
+        from pathlib import Path as _Path
+
+        from huggingface_hub import hf_hub_download
+
         repo_id, subfolder = extractor_source.split(":", 1)
-        return ASTFeatureExtractor.from_pretrained(repo_id, subfolder=subfolder)
-    return ASTFeatureExtractor.from_pretrained(extractor_source)
+        config_path = hf_hub_download(
+            repo_id=repo_id,
+            filename=f"{subfolder}/preprocessor_config.json",
+        )
+        return MelFrontend.from_config(_Path(config_path).parent)
+    return MelFrontend.from_config(extractor_source)
 
 
 def _collect_test_samples(test_dir: Path) -> list[tuple[Path, int]]:
