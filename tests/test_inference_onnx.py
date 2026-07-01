@@ -1,12 +1,16 @@
 """Tests for coffee_first_crack.inference_onnx — profile loading and config logic.
 
-These tests exercise config resolution, thread defaults, and parameter override
-precedence without requiring an ONNX model or audio files.
+These tests exercise config resolution, thread defaults, parameter override
+precedence, and the torch-free import guarantee — none require an ONNX model
+or audio files.
 """
 
 from __future__ import annotations
 
+import builtins
+import importlib
 import platform
+import sys
 from unittest.mock import patch
 
 from coffee_first_crack.inference_onnx import _default_threads, _load_profile
@@ -102,3 +106,40 @@ class TestOnnxSlidingWindowOverrides:
         min_pops = 0
         result = cfg.get("min_pops", 5) if min_pops is None else min_pops
         assert result == 0
+
+
+# ── Torch-free import test ─────────────────────────────────────────────────────
+
+
+def test_inference_onnx_imports_without_torch() -> None:
+    """importing inference_onnx must succeed when torch and transformers are absent.
+
+    Simulates the Raspberry Pi environment where torch and transformers are not
+    installed.  The module is reloaded after blocking the two heavy packages so
+    any eager top-level import would raise immediately.
+
+    This is the blocker guard for D27 Phase 1: ``inference_onnx`` must be
+    importable on a torch-free Pi without raising ``ModuleNotFoundError``.
+    """
+    _real_import = builtins.__import__
+
+    _blocked = frozenset({"torch", "transformers"})
+
+    def _blocking_import(name: str, *args: object, **kwargs: object) -> object:
+        top = name.split(".")[0]
+        if top in _blocked:
+            raise ModuleNotFoundError(f"No module named {name!r} (blocked in test)")
+        return _real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    # Remove any cached copies so the reload sees the patched importer
+    to_remove = [k for k in sys.modules if k == "coffee_first_crack.inference_onnx"]
+    for k in to_remove:
+        del sys.modules[k]
+
+    with patch("builtins.__import__", side_effect=_blocking_import):
+        # Must not raise — the top-level of inference_onnx must be torch-free
+        mod = importlib.import_module("coffee_first_crack.inference_onnx")
+
+    # Sanity: the key public classes are present
+    assert hasattr(mod, "OnnxSlidingWindowInference")
+    assert hasattr(mod, "OnnxFirstCrackDetector")

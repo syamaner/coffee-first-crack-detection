@@ -22,7 +22,8 @@ import time
 from pathlib import Path
 
 import numpy as np
-from transformers import ASTFeatureExtractor
+
+from coffee_first_crack.mel_frontend import MelFrontend
 
 SAMPLE_RATE = 16000
 WINDOW_SEC = 10.0
@@ -37,7 +38,7 @@ def _default_threads() -> int:
 
 def benchmark_model(
     onnx_path: Path,
-    extractor: ASTFeatureExtractor,
+    extractor: MelFrontend,
     n_warmup: int = 5,
     n_runs: int = 30,
     threads: int = 0,
@@ -46,7 +47,7 @@ def benchmark_model(
 
     Args:
         onnx_path: Path to the ``.onnx`` file.
-        extractor: Pre-built ``ASTFeatureExtractor``.
+        extractor: Pre-built :class:`~coffee_first_crack.mel_frontend.MelFrontend`.
         n_warmup: Number of warmup runs (not counted).
         n_runs: Number of timed runs.
         threads: ONNX Runtime intra-op threads (0 = auto).
@@ -147,8 +148,8 @@ def main() -> None:
         print(f"Error: no .onnx files found under {args.onnx_dir}")
         raise SystemExit(1)
 
-    # Load feature extractor from the first ONNX model's saved preprocessor config
-    extractor = ASTFeatureExtractor.from_pretrained(str(onnx_files[0].parent))
+    # Load numpy/scipy mel front-end from the first ONNX model's saved preprocessor config
+    extractor = MelFrontend.from_config(onnx_files[0].parent)
 
     results: list[dict[str, object]] = []
     for onnx_path in onnx_files:
