@@ -28,10 +28,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import queue
 import re
+import signal
 import sys
 import threading
 import time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -51,6 +54,14 @@ _CONFIG_PATH = Path("configs/default.yaml")
 _SILENCE_THRESHOLD_DBFS: float = -60.0  # below this → mic is considered silent
 _BALANCE_WARN_DB: float = 6.0  # RMS difference above this → balance warning
 _SILENCE_CHECK_AFTER_SEC: float = 5.0  # seconds before first silence check fires
+
+# Verification thresholds (Part 2 of #49)
+_CLIP_WARN_DBFS: float = -0.5  # peak >= this → clipping warning
+_QUIET_WARN_DBFS: float = -30.0  # peak < this → too-quiet warning
+_DURATION_TOLERANCE_SEC: float = 1.0  # session JSON vs actual audio duration slack
+
+# Producer-consumer queue sentinel: signals the writer thread to flush + close.
+_QUEUE_STOP = None
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +255,346 @@ def _print_session_summary(
 
 
 # ---------------------------------------------------------------------------
+# Streaming writer (Part 1 of #49)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class StreamingWriter:
+    """Producer-consumer writer that streams multi-mic audio to disk.
+
+    A PortAudio callback (the producer) pushes raw multi-channel blocks onto
+    a thread-safe :class:`queue.Queue` with a non-blocking ``put`` \u2014 no I/O,
+    no numpy work, no locking happens on the audio thread.  A dedicated writer
+    thread (the consumer) owns every per-mic :class:`soundfile.SoundFile`
+    handle, applies gain + clipping, and writes incrementally so at most one
+    queued block is ever unflushed to disk.  This bounds peak memory to the
+    queue depth (a handful of blocks) instead of the full recording, and a
+    ``SIGTERM``/crash after the writer thread starts still leaves a valid,
+    playable partial WAV file up to the last flushed block because
+    ``soundfile`` patches the RIFF header on every close of the stream.
+
+    Args:
+        output_paths: Per-mic temporary ``_recording`` WAV paths, in the same
+            order as *mics*.
+        mics: Ordered mic numbers (1-indexed; mic N reads channel N-1).
+        gains: Per-mic digital gain multipliers, same length as *mics*.
+        sample_rate: Capture sample rate in Hz.
+
+    Attributes:
+        frames_written: Total multi-channel frames written so far (updated
+            only by the writer thread; read from the main thread only after
+            :meth:`join` has returned, per the class docstring's ownership
+            rule).
+    """
+
+    output_paths: list[Path]
+    mics: list[int]
+    gains: list[float]
+    sample_rate: int
+    frames_written: int = field(default=0, init=False)
+    _queue: queue.Queue[np.ndarray | None] = field(default_factory=queue.Queue, init=False)
+    _thread: threading.Thread | None = field(default=None, init=False)
+    _stats_window: list[np.ndarray] = field(default_factory=list, init=False)
+    _stats_lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+
+    def start(self) -> None:
+        """Start the writer thread. Call once before feeding the queue."""
+        self._thread = threading.Thread(target=self._run, name="streaming-writer", daemon=False)
+        self._thread.start()
+
+    def put(self, block: np.ndarray) -> None:
+        """Enqueue a raw multi-channel block captured by the audio callback.
+
+        Safe to call from the PortAudio callback thread: this only performs a
+        non-blocking queue push, never I/O.
+
+        Args:
+            block: Multi-channel float32 array, shape ``(frames, n_channels)``.
+        """
+        self._queue.put(block)
+
+    def stop_and_join(self) -> None:
+        """Queue the stop sentinel and block until the writer thread exits.
+
+        Safe to call from the main thread or a signal handler.  Flushes and
+        closes every ``SoundFile`` handle before returning.
+        """
+        self._queue.put(_QUEUE_STOP)
+        if self._thread is not None:
+            self._thread.join()
+
+    def stats_window(self) -> list[np.ndarray]:
+        """Return the raw multi-channel blocks written since the last call.
+
+        Used to compute heartbeat / silence-check stats without retaining the
+        full recording in memory.  Draining resets the window.
+
+        Returns:
+            List of multi-channel blocks written since the previous call to
+            this method (or since :meth:`start`, on the first call).
+        """
+        with self._stats_lock:
+            window, self._stats_window = self._stats_window, []
+        return window
+
+    def _run(self) -> None:
+        """Writer-thread body: consume the queue, write, close on sentinel."""
+        files = [
+            sf.SoundFile(str(p), mode="w", samplerate=self.sample_rate, channels=1, subtype="FLOAT")
+            for p in self.output_paths
+        ]
+        try:
+            while True:
+                block = self._queue.get()
+                if block is None:  # sentinel
+                    break
+                with self._stats_lock:
+                    self._stats_window.append(block)
+                self.frames_written += len(block)
+                for handle, m, gain in zip(files, self.mics, self.gains, strict=True):
+                    ch_idx = m - 1
+                    audio: np.ndarray = np.clip(
+                        block[:, ch_idx] * np.float32(gain), -1.0, 1.0
+                    ).astype(np.float32, copy=False)
+                    handle.write(audio)
+        finally:
+            for handle in files:
+                handle.close()
+
+
+# ---------------------------------------------------------------------------
+# Post-recording verification (Part 2 of #49)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class VerificationResult:
+    """Outcome of a single post-recording verification check.
+
+    Attributes:
+        name: Short machine-stable check name, e.g. ``"mic1 levels"``.
+        passed: ``True`` if the check passed (including warn-only checks that
+            did not trigger), ``False`` on failure.
+        message: Human-readable detail, ready to print.
+    """
+
+    name: str
+    passed: bool
+    message: str
+
+
+def verify_mic_levels(label: str, peak_dbfs: float, rms_dbfs: float) -> VerificationResult:
+    """Flag clipping or too-quiet levels for one mic's full-session audio.
+
+    Args:
+        label: Hardware label for this mic, used in the message.
+        peak_dbfs: Full-session peak level in dBFS.
+        rms_dbfs: Full-session RMS level in dBFS.
+
+    Returns:
+        A :class:`VerificationResult`; ``passed`` is ``False`` when the peak
+        indicates clipping (``>= -0.5 dBFS``) or is too quiet (``< -30 dBFS``).
+    """
+    if peak_dbfs >= _CLIP_WARN_DBFS:
+        return VerificationResult(
+            f"{label} levels",
+            False,
+            f"peak={peak_dbfs:.1f} dBFS  RMS={rms_dbfs:.1f} dBFS  \u274c CLIPPING",
+        )
+    if peak_dbfs < _QUIET_WARN_DBFS:
+        return VerificationResult(
+            f"{label} levels",
+            False,
+            f"peak={peak_dbfs:.1f} dBFS  RMS={rms_dbfs:.1f} dBFS  \u274c TOO QUIET",
+        )
+    return VerificationResult(
+        f"{label} levels",
+        True,
+        f"peak={peak_dbfs:.1f} dBFS  RMS={rms_dbfs:.1f} dBFS  \u2705 levels OK",
+    )
+
+
+def verify_balance(rms_values: list[float]) -> VerificationResult:
+    """Check that per-mic RMS levels agree within the balance threshold.
+
+    Args:
+        rms_values: Full-session RMS dBFS for each recorded mic, in mic order.
+
+    Returns:
+        A :class:`VerificationResult`; ``passed`` is ``False`` when the max
+        minus min RMS exceeds :data:`_BALANCE_WARN_DB` (6 dB). Always passes
+        (with an explanatory message) when fewer than two mics are present.
+    """
+    if len(rms_values) < 2:
+        return VerificationResult("Balance", True, "n/a (single mic)")
+    balance = max(rms_values) - min(rms_values)
+    if balance > _BALANCE_WARN_DB:
+        return VerificationResult(
+            "Balance", False, f"{balance:.1f} dB  \u274c UNBALANCED (>{_BALANCE_WARN_DB:.0f}dB)"
+        )
+    return VerificationResult("Balance", True, f"{balance:.1f} dB  \u2705 balanced")
+
+
+def verify_sample_lock(mics: list[int], frame_counts: list[int]) -> VerificationResult:
+    """Check that every mic's WAV file has an identical sample (frame) count.
+
+    A CoreAudio Aggregate Device with Drift Correction should keep every
+    channel sample-locked for the full session; a mismatch means the writer
+    dropped or duplicated a block for one mic.
+
+    Args:
+        mics: Ordered mic numbers.
+        frame_counts: Frame count read back from each mic's WAV file, same
+            order as *mics*.
+
+    Returns:
+        A :class:`VerificationResult`; ``passed`` is ``False`` when frame
+        counts differ across mics.
+    """
+    detail = "  ".join(f"mic{m}={n:,}" for m, n in zip(mics, frame_counts, strict=True))
+    if len(set(frame_counts)) > 1:
+        return VerificationResult("Samples", False, f"{detail}  \u274c NOT sample-locked")
+    return VerificationResult("Samples", True, f"{detail}  \u2705 sample-locked")
+
+
+def verify_duration(session_duration_sec: float, actual_duration_sec: float) -> VerificationResult:
+    """Check that the session JSON duration matches the actual audio duration.
+
+    Args:
+        session_duration_sec: ``duration_sec`` recorded in the session JSON.
+        actual_duration_sec: Duration computed from the WAV frame count and
+            sample rate.
+
+    Returns:
+        A :class:`VerificationResult`; ``passed`` is ``False`` when the two
+        values differ by more than :data:`_DURATION_TOLERANCE_SEC` (1s).
+    """
+    delta = abs(session_duration_sec - actual_duration_sec)
+    if delta > _DURATION_TOLERANCE_SEC:
+        return VerificationResult(
+            "Duration",
+            False,
+            f"session.json={session_duration_sec:.1f}s  audio={actual_duration_sec:.1f}s  "
+            f"\u274c mismatch (\u0394{delta:.1f}s)",
+        )
+    return VerificationResult(
+        "Duration",
+        True,
+        f"session.json={session_duration_sec:.1f}s  audio={actual_duration_sec:.1f}s  \u2705 match",
+    )
+
+
+def verify_session_files_present(
+    session_data: dict[str, Any], output_dir: Path
+) -> VerificationResult:
+    """Check that every ``file`` entry in the session JSON exists on disk.
+
+    Args:
+        session_data: Parsed session JSON dict (must contain a ``"mics"``
+            list of dicts each with a ``"file"`` key).
+        output_dir: Directory the session's WAV files were written into.
+
+    Returns:
+        A :class:`VerificationResult`; ``passed`` is ``False`` when any
+        listed file is missing, naming the first missing file.
+    """
+    missing = [
+        mic["file"]
+        for mic in session_data.get("mics", [])
+        if not (output_dir / mic["file"]).exists()
+    ]
+    if missing:
+        return VerificationResult(
+            "Session JSON", False, f"\u274c missing file(s): {', '.join(missing)}"
+        )
+    return VerificationResult("Session JSON", True, "all files present  \u2705")
+
+
+def verify_recording_session(session_path: Path, output_dir: Path) -> list[VerificationResult]:
+    """Run every post-recording verification check for one recorded session.
+
+    Reads the session JSON and each mic's WAV file directly from disk \u2014 this
+    is a fully independent read-back, so it also catches a WAV header left
+    inconsistent by a crashed or killed writer.
+
+    Args:
+        session_path: Path to the ``*-session.json`` file written by
+            :func:`cmd_record`.
+        output_dir: Directory containing the session's WAV files (normally
+            *session_path*'s parent).
+
+    Returns:
+        Ordered list of :class:`VerificationResult` \u2014 per-mic level checks,
+        then balance, sample-lock, duration, and session-JSON presence.
+    """
+    session_data: dict[str, Any] = json.loads(session_path.read_text())
+    mics_meta: list[dict[str, Any]] = session_data.get("mics", [])
+    sample_rate: int = session_data["sample_rate"]
+
+    results: list[VerificationResult] = []
+    rms_values: list[float] = []
+    frame_counts: list[int] = []
+    mics_ok: list[int] = []
+    max_frames = 0
+
+    for mic in mics_meta:
+        wav_path = output_dir / mic["file"]
+        if not wav_path.exists():
+            results.append(
+                VerificationResult(
+                    f"mic{mic['mic_num']} levels",
+                    False,
+                    f"\u274c file not found: {wav_path.name}",
+                )
+            )
+            continue
+        try:
+            with sf.SoundFile(str(wav_path)) as handle:
+                frames = len(handle)
+                audio = handle.read(dtype="float32", always_2d=False)
+        except Exception as exc:  # noqa: BLE001 \u2014 surface any libsndfile failure as a check failure
+            results.append(
+                VerificationResult(
+                    f"mic{mic['mic_num']} levels", False, f"\u274c unreadable/corrupt WAV: {exc}"
+                )
+            )
+            continue
+        peak, rms = _dbfs(np.asarray(audio, dtype=np.float32))
+        mic_label = f"mic{mic['mic_num']} ({mic.get('label', '')})"
+        results.append(verify_mic_levels(mic_label, peak, rms))
+        rms_values.append(rms)
+        frame_counts.append(frames)
+        mics_ok.append(mic["mic_num"])
+        max_frames = max(max_frames, frames)
+
+    results.append(verify_balance(rms_values))
+    if frame_counts:
+        results.append(verify_sample_lock(mics_ok, frame_counts))
+        actual_duration = max_frames / sample_rate if sample_rate else 0.0
+        results.append(verify_duration(session_data.get("duration_sec", 0.0), actual_duration))
+    results.append(verify_session_files_present(session_data, output_dir))
+    return results
+
+
+def print_verification_report(results: list[VerificationResult]) -> bool:
+    """Print the post-recording verification report and return overall pass/fail.
+
+    Args:
+        results: Ordered check results from :func:`verify_recording_session`.
+
+    Returns:
+        ``True`` if every check passed, ``False`` otherwise.
+    """
+    print("\n--- Post-recording verification ---")
+    for result in results:
+        print(f"{result.name}: {result.message}")
+    all_passed = all(r.passed for r in results)
+    print("\u2705 All checks passed" if all_passed else "\u274c Some checks FAILED")
+    return all_passed
+
+
+# ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------
 
@@ -386,10 +737,13 @@ def cmd_record(args: argparse.Namespace) -> None:
     output_dir: Path = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Check both normal and _partial candidates — we don't know the session
-    # duration yet, so a re-run could silently overwrite a prior partial session.
+    # Check normal, _partial, and _recording (in-progress temp) candidates — we
+    # don't know the session duration yet, so a re-run could silently overwrite
+    # a prior partial session, and a leftover _recording file means either a
+    # session is already running under this name or a previous one crashed
+    # mid-write without being renamed.
     base = f"{args.origin}-roast{args.roast_num}"
-    for sfx in ("", "_partial"):
+    for sfx in ("", "_partial", "_recording"):
         for m in mics:
             p = output_dir / f"mic{m}-{base}{sfx}.wav"
             if p.exists():
@@ -426,16 +780,20 @@ def cmd_record(args: argparse.Namespace) -> None:
     print(f"Device    : {device} | {sample_rate} Hz | {n_channels} ch open")
     print("Ctrl-C to stop.\n")
 
-    # Accumulate audio chunks via callback
-    chunks: list[np.ndarray] = []
-    lock = threading.Lock()
     recorded_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     start = time.monotonic()
+
+    # Temp filenames during recording; renamed to final/_partial names on stop
+    # (see the module docstring's "_partial suffix handling" design).
+    temp_paths = [output_dir / f"mic{m}-{base}_recording.wav" for m in mics]
+    writer = StreamingWriter(
+        output_paths=temp_paths, mics=mics, gains=gains, sample_rate=sample_rate
+    )
+    writer.start()
 
     # Live monitoring state
     silence_warned: set[int] = set()  # mic numbers already warned about silence
     silence_checked = False  # True once the initial 5-second silence check has run
-    heartbeat_chunk_offset = 0  # chunk count at the previous heartbeat (for windowing)
 
     # Rate-limit status warnings to avoid flooding stderr on transient glitches.
     _status_warn_interval = 5.0
@@ -453,8 +811,19 @@ def cmd_record(args: argparse.Namespace) -> None:
             if now - _last_status_warn >= _status_warn_interval:
                 print(f"Warning: audio input status: {status}", file=sys.stderr)
                 _last_status_warn = now
-        with lock:
-            chunks.append(indata.copy())
+        # No I/O, no numpy ops here — just a non-blocking handoff to the
+        # writer thread's queue, per the #49 design constraint.
+        writer.put(indata.copy())
+
+    # SIGTERM must trigger the same clean shutdown as Ctrl-C: stop the input
+    # stream and let the writer thread flush + close every SoundFile handle
+    # before the process exits, instead of losing whatever is still queued.
+    stop_requested = threading.Event()
+
+    def _handle_sigterm(_signum: int, _frame: object) -> None:
+        stop_requested.set()
+
+    previous_sigterm_handler = signal.signal(signal.SIGTERM, _handle_sigterm)
 
     try:
         with sd.InputStream(
@@ -464,7 +833,7 @@ def cmd_record(args: argparse.Namespace) -> None:
             callback=_callback,
         ):
             next_heartbeat = start + 30.0
-            while True:
+            while not stop_requested.is_set():
                 time.sleep(0.25)
                 now = time.monotonic()
                 elapsed = now - start
@@ -472,22 +841,13 @@ def cmd_record(args: argparse.Namespace) -> None:
                 # Initial silence check after _SILENCE_CHECK_AFTER_SEC seconds.
                 # Fires once regardless of --quiet so the warning always reaches stderr.
                 if not silence_checked and elapsed >= _SILENCE_CHECK_AFTER_SEC:
-                    with lock:
-                        init_chunks = list(chunks)
                     silence_warned, silence_checked = _run_initial_silence_check(
-                        init_chunks, mics, labels, gains, silence_warned
+                        writer.stats_window(), mics, labels, gains, silence_warned
                     )
 
                 # 30-second heartbeat: live stats + silence re-check.
                 if now >= next_heartbeat:
-                    with lock:
-                        current_chunks = list(chunks)
-                    chunk_offset = heartbeat_chunk_offset
-                    heartbeat_chunk_offset = len(current_chunks)
-
-                    hb_stats = _mic_stats_from_chunks(
-                        current_chunks, mics, gains, start_chunk=chunk_offset
-                    )
+                    hb_stats = _mic_stats_from_chunks(writer.stats_window(), mics, gains)
                     # Re-check for silent mics on each heartbeat (always, even --quiet)
                     silence_warned = _check_silent_mics(hb_stats, mics, labels, silence_warned)
                     if not args.quiet:
@@ -495,24 +855,25 @@ def cmd_record(args: argparse.Namespace) -> None:
                     next_heartbeat = now + 30.0
     except KeyboardInterrupt:
         pass
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm_handler)
 
     duration = time.monotonic() - start
     print(f"\nStopped after {duration:.1f}s.")
 
-    # Copy chunk list under lock to avoid a race with any in-flight callback
-    # during stream shutdown (stream.stop() is ordered, but no memory barrier
-    # without the lock).
-    with lock:
-        recorded_chunks = list(chunks)
+    # Flush and close every SoundFile handle. Safe to call unconditionally —
+    # even a zero-frame session gets valid (empty) WAV headers closed cleanly.
+    writer.stop_and_join()
 
-    if not recorded_chunks:
+    if writer.frames_written == 0:
         print("No audio captured.")
+        for p in temp_paths:
+            p.unlink(missing_ok=True)
         return
 
-    recording = np.concatenate(recorded_chunks, axis=0)
     # Use actual sample count for duration — wall-clock time includes PortAudio
     # initialisation latency (~1-2s) before the first callback fires.
-    audio_duration = len(recording) / sample_rate
+    audio_duration = writer.frames_written / sample_rate
 
     # Short-session guard
     is_partial = audio_duration < args.min_duration
@@ -525,20 +886,20 @@ def cmd_record(args: argparse.Namespace) -> None:
 
     print()
 
-    # Write per-mic WAV files
+    # Rename each mic's temp _recording file to its final name.
     mic_meta: list[dict[str, Any]] = []
-    for m, label, gain in zip(mics, labels, gains, strict=True):
-        ch_idx = m - 1
-        audio: np.ndarray = np.clip(recording[:, ch_idx] * np.float32(gain), -1.0, 1.0).astype(
-            np.float32, copy=False
-        )
-        filename = f"mic{m}-{args.origin}-roast{args.roast_num}{suffix}.wav"
-        sf.write(str(output_dir / filename), audio, sample_rate, subtype="FLOAT")
+    final_paths: list[Path] = []
+    for temp_path, m, label, gain in zip(temp_paths, mics, labels, gains, strict=True):
+        filename = f"mic{m}-{base}{suffix}.wav"
+        final_path = output_dir / filename
+        temp_path.rename(final_path)
+        final_paths.append(final_path)
         print(f"  Wrote {filename}")
         mic_meta.append({"mic_num": m, "label": label, "gain": gain, "file": filename})
 
-    # Write session JSON
-    session_filename = f"{args.origin}-roast{args.roast_num}-session{suffix}.json"
+    # Write session JSON only after every rename has completed.
+    session_filename = f"{base}-session{suffix}.json"
+    session_path = output_dir / session_filename
     session_data: dict[str, Any] = {
         "origin": args.origin,
         "roast_num": args.roast_num,
@@ -547,17 +908,28 @@ def cmd_record(args: argparse.Namespace) -> None:
         "recorded_at": recorded_at,
         "mics": mic_meta,
     }
-    with (output_dir / session_filename).open("w") as f:
+    with session_path.open("w") as f:
         json.dump(session_data, f, indent=2)
         f.write("\n")
     print(f"  Wrote {session_filename}")
 
-    # Full-session level summary
-    summary_stats = _mic_stats_from_chunks([recording], mics, gains)
+    # Full-session level summary, read back from the finalized WAV files so
+    # the summary reflects exactly what was written to disk.
+    summary_audio = [sf.read(str(p), dtype="float32", always_2d=False)[0] for p in final_paths]
+    summary_stats = [
+        {k: v for k, v in zip(("peak", "rms"), _dbfs(np.asarray(a, dtype=np.float32)), strict=True)}
+        for a in summary_audio
+    ]
     _print_session_summary(summary_stats, mics, labels)
 
     n = len(mics)
     print(f"\nDone. {audio_duration:.1f}s audio -> {n} WAV(s) + session JSON in {output_dir}")
+
+    if args.verify:
+        results = verify_recording_session(session_path, output_dir)
+        all_passed = print_verification_report(results)
+        if not all_passed:
+            sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -646,6 +1018,16 @@ def main() -> None:
         help=(
             f"Sessions shorter than this (seconds) are saved with a _partial suffix "
             f"(default: {_DEFAULT_MIN_DURATION_SEC})"
+        ),
+    )
+    rec.add_argument(
+        "--verify",
+        action="store_true",
+        help=(
+            "Run post-recording verification (peak/RMS/dBFS, sample-lock, "
+            "balance, duration, session JSON) after writing and print a "
+            "report. Off by default to keep the tool fast; exits non-zero "
+            "if any check fails."
         ),
     )
 
