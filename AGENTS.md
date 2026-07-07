@@ -148,11 +148,15 @@ pyright src/
 `.github/workflows/ci.yml` runs on every push and pull request:
 
 - **`test`** — installs `.[all]` (torch/transformers included) and runs
-  `pytest` with coverage. This is currently the only *blocking* gate: as of
-  the CI being added (#57), `ruff check`, `ruff format --check`, and `pyright`
-  all fail on pre-existing `main` content, so they are not wired as required
-  jobs yet (a red gate the code doesn't pass is worse than no gate — see the
-  in-file comment). Clean those up in a follow-up PR, then add them here.
+  `pytest` with coverage.
+- **`lint`** — installs `.[all]` (pyright needs torch/transformers on the path
+  to type-check `dataset.py`, `inference.py`, `model.py`, `train.py`, etc.)
+  and runs `ruff check .`, `ruff format --check .`, and `pyright src/` as
+  blocking steps. As of the CI being added (#57), all three failed on
+  pre-existing `main` content (28 ruff lint errors, 9 files needing
+  `ruff format`, 27 pyright errors), so they were deliberately left
+  unwired — a red gate the code doesn't pass is worse than no gate. #59
+  cleaned up that debt and wired this job.
 - **`torch-free-import`** — the load-bearing gate #57 exists for. Installs
   only `requirements-pi.txt` (the Raspberry Pi 5 / torch-free dependency set,
   D27 Phase 1) plus the package with `--no-deps`, then asserts

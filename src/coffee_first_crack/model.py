@@ -11,6 +11,7 @@ from typing import Any
 
 import torch
 from transformers import ASTFeatureExtractor, ASTForAudioClassification
+from transformers.feature_extraction_utils import BatchFeature
 
 from coffee_first_crack.utils.device import get_device
 
@@ -65,7 +66,12 @@ def build_model(
         label2id=LABEL2ID,
         ignore_mismatched_sizes=True,
     )
-    return model.to(device)
+    # transformers' `PreTrainedModel.to` is `@wraps(torch.nn.Module.to)`;
+    # pyright's typeshed stub for `functools.wraps` on a bound method mis-binds
+    # the wrapped call's `self` parameter, misreporting `device` (a str) as
+    # being passed as `self`. False positive — this is the same `.to(device)`
+    # call as plain `nn.Module.to`, which pyright accepts.
+    return model.to(device)  # pyright: ignore[reportArgumentType]
 
 
 class FirstCrackClassifier(torch.nn.Module):
@@ -103,7 +109,10 @@ class FirstCrackClassifier(torch.nn.Module):
             label2id=LABEL2ID,
             ignore_mismatched_sizes=True,
         )
-        self.model.to(device)
+        # See the `pyright: ignore` note on the equivalent call in build_model()
+        # above — `PreTrainedModel.to` mis-binds under pyright's typeshed stub
+        # for `functools.wraps`; the call itself is correct at runtime.
+        self.model.to(device)  # pyright: ignore[reportArgumentType]
         self.sampling_rate: int = self.feature_extractor.sampling_rate  # type: ignore[assignment]
 
     def forward(self, audio_batch: torch.Tensor) -> torch.Tensor:
@@ -120,15 +129,13 @@ class FirstCrackClassifier(torch.nn.Module):
             audio_batch = audio_batch.unsqueeze(0)
 
         # Feature extraction runs on CPU (HF processors don't support MPS/CUDA)
-        audio_list: list[list[float]] = [
-            x.detach().cpu().float().tolist() for x in audio_batch
-        ]
-        inputs: dict[str, Any] = self.feature_extractor(
+        audio_list: list[list[float]] = [x.detach().cpu().float().tolist() for x in audio_batch]
+        batch_features: BatchFeature = self.feature_extractor(
             audio_list,
             sampling_rate=self.sampling_rate,
             return_tensors="pt",
         )
-        inputs = {k: v.to(self.device_str) for k, v in inputs.items()}
+        inputs: dict[str, Any] = {k: v.to(self.device_str) for k, v in batch_features.items()}
         return self.model(**inputs).logits
 
     @torch.inference_mode()

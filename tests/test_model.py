@@ -11,13 +11,12 @@ import torch
 from transformers import ASTFeatureExtractor, ASTForAudioClassification
 
 from coffee_first_crack.model import (
-    LABEL2ID,
     ID2LABEL,
+    LABEL2ID,
     FirstCrackClassifier,
     build_feature_extractor,
     build_model,
 )
-
 
 # ── Module-scoped fixtures — model loaded once per slow test session ──────────
 

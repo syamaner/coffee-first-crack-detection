@@ -29,7 +29,7 @@ def _patch_asyncio_event_loop_del() -> None:
     if getattr(original_del, "_spaces_app_patched", False):
         return
 
-    def _patched_del(self: _base_events.BaseEventLoop) -> None:  # noqa: ANN
+    def _patched_del(self: _base_events.BaseEventLoop) -> None:
         try:
             original_del(self)
         except ValueError as exc:
@@ -42,9 +42,14 @@ def _patch_asyncio_event_loop_del() -> None:
 
 _patch_asyncio_event_loop_del()
 
-import gradio as gr
-from huggingface_hub import hf_hub_download
-from transformers import pipeline as hf_pipeline
+# E402 (module-level import not at top of file) is intentional here: the
+# patch above must be applied *before* gradio is imported, since importing
+# gradio is what creates the intermediate asyncio event loops that trigger
+# the noisy-but-benign GC error it suppresses. Moving these imports above
+# the patch call would defeat its purpose.
+import gradio as gr  # noqa: E402
+from huggingface_hub import hf_hub_download  # noqa: E402
+from transformers import pipeline as hf_pipeline  # noqa: E402
 
 _REPO_ID = "syamaner/coffee-first-crack-detection"
 
@@ -65,6 +70,7 @@ def _get_pipe() -> object:
     if _pipe is None:
         _pipe = hf_pipeline("audio-classification", model=_REPO_ID)
     return _pipe
+
 
 _DESCRIPTION = """\
 Upload a **10-second** coffee roasting audio clip to check for **first crack** \

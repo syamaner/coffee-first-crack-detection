@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import csv
 import re
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import librosa
 import numpy as np
@@ -177,10 +178,12 @@ class FirstCrackDataset(Dataset):
         for _, label in self.samples:
             counts[label] += 1
         total = len(self.samples)
-        return torch.FloatTensor([
-            total / (2 * counts[0]),
-            total / (2 * counts[1]),
-        ])
+        return torch.FloatTensor(
+            [
+                total / (2 * counts[0]),
+                total / (2 * counts[1]),
+            ]
+        )
 
     def get_statistics(self) -> dict[str, Any]:
         """Return basic dataset statistics."""
@@ -239,16 +242,10 @@ def create_dataloaders(
     train_dataset = FirstCrackDataset(
         train_dir, sample_rate, target_length, crop_mode=train_crop_mode
     )
-    val_dataset = FirstCrackDataset(
-        val_dir, sample_rate, target_length, crop_mode=eval_crop_mode
-    )
+    val_dataset = FirstCrackDataset(val_dir, sample_rate, target_length, crop_mode=eval_crop_mode)
 
-    train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, **loader_kwargs
-    )
-    val_loader = DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False, **loader_kwargs
-    )
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, **loader_kwargs)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, **loader_kwargs)
 
     if test_dir is not None:
         test_dataset = FirstCrackDataset(
@@ -288,13 +285,15 @@ def generate_recordings_manifest(raw_dir: Path | str, output_path: Path | str) -
             duration = librosa.get_duration(path=str(wav_file))
         except Exception:
             duration = 0.0
-        rows.append({
-            "filename": wav_file.name,
-            "microphone": meta["microphone"],
-            "coffee_origin": meta["coffee_origin"],
-            "duration_sec": f"{duration:.2f}",
-            "notes": "",
-        })
+        rows.append(
+            {
+                "filename": wav_file.name,
+                "microphone": meta["microphone"],
+                "coffee_origin": meta["coffee_origin"],
+                "duration_sec": f"{duration:.2f}",
+                "notes": "",
+            }
+        )
 
     fieldnames = ["filename", "microphone", "coffee_origin", "duration_sec", "notes"]
     with output_path.open("w", newline="") as f:
