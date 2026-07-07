@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -34,13 +35,13 @@ import torch
 import torch.nn as nn
 import yaml
 from transformers import (
-    ASTForAudioClassification,
     EarlyStoppingCallback,
     Trainer,
     TrainingArguments,
 )
+from transformers.trainer_utils import EvalPrediction
 
-from coffee_first_crack.dataset import FirstCrackDataset, create_dataloaders
+from coffee_first_crack.dataset import FirstCrackDataset
 from coffee_first_crack.model import (
     DEFAULT_BASE_MODEL,
     build_feature_extractor,
@@ -48,7 +49,6 @@ from coffee_first_crack.model import (
 )
 from coffee_first_crack.utils.device import get_dataloader_kwargs, get_device
 from coffee_first_crack.utils.metrics import MetricsCalculator
-
 
 # ── Weighted-loss trainer ─────────────────────────────────────────────────────
 
@@ -68,25 +68,29 @@ class WeightedLossTrainer(Trainer):
     def __init__(
         self,
         class_weights: torch.Tensor,
-        *args: Any,
-        **kwargs: Any,
+        *args: Any,  # noqa: ANN401 — forwarded verbatim to transformers.Trainer.__init__,
+        **kwargs: Any,  # noqa: ANN401 — whose own signature is a wide, version-dependent union
     ) -> None:
         super().__init__(*args, **kwargs)
         self.class_weights = class_weights
 
     def compute_loss(
         self,
-        model: ASTForAudioClassification,
+        model: nn.Module,
         inputs: dict[str, Any],
         return_outputs: bool = False,
-        **kwargs: Any,
+        num_items_in_batch: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, Any]:
         """Override loss with class-weighted CrossEntropyLoss.
 
         Args:
-            model: The model being trained.
+            model: The model being trained (an ``ASTForAudioClassification``
+                at runtime; typed as ``nn.Module`` to match the ``Trainer``
+                base-class signature it overrides).
             inputs: Batch dict containing ``labels`` and model inputs.
             return_outputs: If ``True``, also return model outputs.
+            num_items_in_batch: Unused; accepted for signature compatibility
+                with ``Trainer.compute_loss`` across transformers versions.
 
         Returns:
             Loss tensor, or ``(loss, outputs)`` if ``return_outputs`` is ``True``.
@@ -138,7 +142,7 @@ class _HFDatasetAdapter(torch.utils.data.Dataset):
 # ── compute_metrics callback ──────────────────────────────────────────────────
 
 
-def _make_compute_metrics() -> Any:
+def _make_compute_metrics() -> Callable[[EvalPrediction], dict[str, float]]:
     """Return a ``compute_metrics`` function for the HF Trainer.
 
     Uses ``MetricsCalculator`` to compute accuracy, F1, precision, recall,
@@ -149,8 +153,13 @@ def _make_compute_metrics() -> Any:
     accuracy_metric = hf_evaluate.load("accuracy")
     f1_metric = hf_evaluate.load("f1")
 
-    def compute_metrics(eval_pred: Any) -> dict[str, float]:
-        logits, labels = eval_pred
+    def compute_metrics(eval_pred: EvalPrediction) -> dict[str, float]:
+        # `.predictions`/`.label_ids` are typed as `ndarray | tuple[ndarray]` by
+        # transformers; this trainer always produces a single ndarray for each,
+        # so normalise with `np.asarray` to give the rest of the function a
+        # concrete ndarray to work with.
+        logits = np.asarray(eval_pred.predictions)
+        labels = np.asarray(eval_pred.label_ids)
         preds = np.argmax(logits, axis=-1)
         probs = torch.softmax(torch.tensor(logits, dtype=torch.float32), dim=-1).numpy()
 
@@ -160,9 +169,19 @@ def _make_compute_metrics() -> Any:
         calc.all_probs = probs.tolist()
         results = calc.compute()
 
-        # Also use HF evaluate for standard metrics
+        # Also use HF evaluate for standard metrics. `.compute()` is typed as
+        # returning `dict | None` (it returns `None` on non-main processes in
+        # a distributed run); this script trains single-process, so it always
+        # returns the metric dict here, but guard explicitly rather than
+        # assume it away.
         acc = accuracy_metric.compute(predictions=preds, references=labels)
         f1 = f1_metric.compute(predictions=preds, references=labels, average="binary")
+        if acc is None or f1 is None:
+            raise RuntimeError(
+                "evaluate.Metric.compute() returned None — expected a metric dict "
+                "(this can happen in a distributed run on a non-main process, which "
+                "this single-process training script does not support)."
+            )
 
         return {
             "accuracy": acc["accuracy"],
@@ -270,7 +289,9 @@ def train(
     )
 
     class_weights = train_base.get_class_weights()
-    print(f"Class weights: no_first_crack={class_weights[0]:.3f}, first_crack={class_weights[1]:.3f}")
+    print(
+        f"Class weights: no_first_crack={class_weights[0]:.3f}, first_crack={class_weights[1]:.3f}"
+    )
 
     train_dataset = _HFDatasetAdapter(train_base)
     val_dataset = _HFDatasetAdapter(val_base)
@@ -343,11 +364,7 @@ def train(
         eval_dataset=val_dataset,
         processing_class=feature_extractor,
         compute_metrics=_make_compute_metrics(),
-        callbacks=[
-            EarlyStoppingCallback(
-                early_stopping_patience=tc["early_stopping_patience"]
-            )
-        ],
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=tc["early_stopping_patience"])],
     )
 
     # Train
@@ -377,23 +394,32 @@ def main() -> None:
     """CLI entry point for training."""
     parser = argparse.ArgumentParser(description="Train the coffee first crack detection model")
     parser.add_argument(
-        "--data-dir", type=Path, default=Path("data/splits"),
+        "--data-dir",
+        type=Path,
+        default=Path("data/splits"),
         help="Directory containing train/val/test splits (default: data/splits)",
     )
     parser.add_argument(
-        "--experiment-name", type=str, default=None,
+        "--experiment-name",
+        type=str,
+        default=None,
         help="Experiment name (default: exp_YYYYMMDD_HHMMSS)",
     )
     parser.add_argument(
-        "--config", type=Path, default=Path("configs/default.yaml"),
+        "--config",
+        type=Path,
+        default=Path("configs/default.yaml"),
         help="Path to YAML config (default: configs/default.yaml)",
     )
     parser.add_argument(
-        "--resume", type=Path, default=None,
+        "--resume",
+        type=Path,
+        default=None,
         help="Resume from checkpoint directory",
     )
     parser.add_argument(
-        "--push-to-hub", action="store_true",
+        "--push-to-hub",
+        action="store_true",
         help="Push model to HuggingFace Hub after training",
     )
     parser.add_argument("--fp16", action="store_true", help="Enable FP16 (CUDA only)")

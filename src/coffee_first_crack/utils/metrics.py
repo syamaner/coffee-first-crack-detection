@@ -75,16 +75,54 @@ class MetricsCalculator:
         preds = np.array(self.all_preds)
         labels = np.array(self.all_labels)
 
+        # sklearn's classification functions ship without type stubs; pyright
+        # infers `zero_division: str` and `average: str` from the unannotated
+        # defaults ("warn" / "binary"), so the genuinely-valid `zero_division=0`
+        # and `average=None` call forms below need an explicit ignore, not a
+        # runtime change (both are documented, accepted values).
         metrics: dict[str, Any] = {
             "accuracy": accuracy_score(labels, preds),
-            "precision": precision_score(labels, preds, average="binary", zero_division=0),
-            "recall": recall_score(labels, preds, average="binary", zero_division=0),
-            "f1": f1_score(labels, preds, average="binary", zero_division=0),
+            "precision": precision_score(
+                labels,
+                preds,
+                average="binary",
+                zero_division=0,  # pyright: ignore[reportArgumentType]
+            ),
+            "recall": recall_score(
+                labels,
+                preds,
+                average="binary",
+                zero_division=0,  # pyright: ignore[reportArgumentType]
+            ),
+            "f1": f1_score(
+                labels,
+                preds,
+                average="binary",
+                zero_division=0,  # pyright: ignore[reportArgumentType]
+            ),
         }
 
-        # Per-class precision and recall
-        precision_per_class = precision_score(labels, preds, average=None, zero_division=0)
-        recall_per_class = recall_score(labels, preds, average=None, zero_division=0)
+        # Per-class precision and recall. `average=None` makes sklearn return a
+        # per-class ndarray at runtime; pyright infers a scalar `float` return
+        # from the unannotated function (see comment above), so re-assert the
+        # real ndarray shape explicitly with `np.asarray` rather than ignoring
+        # the index access itself.
+        precision_per_class: np.ndarray = np.asarray(
+            precision_score(
+                labels,
+                preds,
+                average=None,  # pyright: ignore[reportArgumentType]
+                zero_division=0,  # pyright: ignore[reportArgumentType]
+            )
+        )
+        recall_per_class: np.ndarray = np.asarray(
+            recall_score(
+                labels,
+                preds,
+                average=None,  # pyright: ignore[reportArgumentType]
+                zero_division=0,  # pyright: ignore[reportArgumentType]
+            )
+        )
         metrics["precision_no_first_crack"] = float(precision_per_class[0])
         metrics["precision_first_crack"] = float(precision_per_class[1])
         metrics["recall_no_first_crack"] = float(recall_per_class[0])
@@ -105,9 +143,7 @@ class MetricsCalculator:
         """
         return confusion_matrix(self.all_labels, self.all_preds)
 
-    def get_classification_report(
-        self, target_names: list[str] | None = None
-    ) -> str:
+    def get_classification_report(self, target_names: list[str] | None = None) -> str:
         """Return a detailed sklearn classification report string.
 
         Args:
@@ -118,7 +154,10 @@ class MetricsCalculator:
         """
         if target_names is None:
             target_names = ["no_first_crack", "first_crack"]
-        return classification_report(
+        # classification_report() returns `dict | str` per pyright's inference
+        # from its unannotated implementation; without `output_dict=True` (not
+        # passed here) it always returns `str` at runtime.
+        return classification_report(  # pyright: ignore[reportReturnType]
             self.all_labels,
             self.all_preds,
             target_names=target_names,

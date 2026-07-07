@@ -337,11 +337,12 @@ class FirstCrackDetector:
 
             if not self._first_crack_detected and recent_positives >= self.min_pops:
                 self._first_crack_detected = True
-                self._first_crack_time = next(
+                first_crack_time = next(
                     t for t, pos, _ in self._detection_history if pos and t >= cutoff
                 )
+                self._first_crack_time = first_crack_time
                 print(
-                    f"FIRST CRACK at {_format_time(self._first_crack_time)} "
+                    f"FIRST CRACK at {_format_time(first_crack_time)} "
                     f"(confidence: {recent_positives} pops)"
                 )
 
@@ -389,7 +390,7 @@ def main() -> None:
             elapsed = detector.get_elapsed_time()
             if result is False:
                 print(f"[{elapsed}] Listening...")
-            else:
+            elif isinstance(result, tuple):
                 _, ts = result
                 print(f"[{elapsed}] First crack at {ts}!")
             time.sleep(3)

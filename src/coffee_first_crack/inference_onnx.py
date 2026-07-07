@@ -107,7 +107,7 @@ def _resolve_onnx_model(
         FileNotFoundError: If no ONNX model is found in the given subfolder.
     """
     from huggingface_hub import hf_hub_download
-    from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
+    from huggingface_hub.errors import EntryNotFoundError, RepositoryNotFoundError
 
     for filename in ("model_quantized.onnx", "model.onnx"):
         try:
@@ -301,7 +301,11 @@ class OnnxSlidingWindowInference:
         inputs = self._extractor(
             [window.tolist()], sampling_rate=self.sample_rate, return_tensors="np"
         )
-        logits = self._session.run(None, {self._input_name: inputs["input_values"]})[0]
+        # ort.InferenceSession.run() is typed to return a union that includes
+        # SparseTensor/list/dict outputs (for models with those output types);
+        # this classifier's single output is always a dense ndarray, so
+        # normalise with np.asarray to give numpy a concrete array to work with.
+        logits = np.asarray(self._session.run(None, {self._input_name: inputs["input_values"]})[0])
 
         # Softmax
         exp_logits = np.exp(logits - np.max(logits, axis=-1, keepdims=True))
@@ -504,7 +508,9 @@ class OnnxFirstCrackDetector:
         inputs = self._extractor(
             [window.tolist()], sampling_rate=self.sample_rate, return_tensors="np"
         )
-        logits = self._session.run(None, {self._input_name: inputs["input_values"]})[0]
+        # See the analogous np.asarray note in
+        # OnnxSlidingWindowInference._predict_window above.
+        logits = np.asarray(self._session.run(None, {self._input_name: inputs["input_values"]})[0])
 
         exp_logits = np.exp(logits - np.max(logits, axis=-1, keepdims=True))
         probs = exp_logits / exp_logits.sum(axis=-1, keepdims=True)

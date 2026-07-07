@@ -15,7 +15,6 @@ from coffee_first_crack.dataset import (
     parse_filename_metadata,
 )
 
-
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
@@ -137,6 +136,7 @@ class TestGenerateRecordingsManifest:
 
     def test_row_count(self, raw_dir: Path, tmp_path: Path) -> None:
         import csv
+
         out = tmp_path / "recordings.csv"
         generate_recordings_manifest(raw_dir, out)
         with out.open() as f:

@@ -24,14 +24,14 @@ import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import seaborn as sns
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import ASTForAudioClassification, ASTFeatureExtractor
 
 from coffee_first_crack.dataset import FirstCrackDataset
-from coffee_first_crack.model import FirstCrackClassifier, build_feature_extractor
+from coffee_first_crack.model import FirstCrackClassifier
 from coffee_first_crack.utils.device import get_dataloader_kwargs, get_device
 from coffee_first_crack.utils.metrics import MetricsCalculator
 
@@ -92,7 +92,7 @@ def evaluate_model(
     return metrics
 
 
-def plot_confusion_matrix(cm: object, output_path: Path) -> None:
+def plot_confusion_matrix(cm: np.ndarray, output_path: Path) -> None:
     """Save a labelled confusion matrix heatmap.
 
     Args:
@@ -121,19 +121,27 @@ def main() -> None:
     """CLI entry point for evaluation."""
     parser = argparse.ArgumentParser(description="Evaluate the first crack detection model")
     parser.add_argument(
-        "--model-dir", type=str, required=True,
+        "--model-dir",
+        type=str,
+        required=True,
         help="Path to save_pretrained checkpoint dir or HuggingFace model ID",
     )
     parser.add_argument(
-        "--test-dir", type=Path, default=Path("data/splits/test"),
+        "--test-dir",
+        type=Path,
+        default=Path("data/splits/test"),
         help="Test set directory (default: data/splits/test)",
     )
     parser.add_argument(
-        "--output-dir", type=Path, default=None,
+        "--output-dir",
+        type=Path,
+        default=None,
         help="Directory to save results (default: <model-dir>/evaluation)",
     )
     parser.add_argument(
-        "--batch-size", type=int, default=8,
+        "--batch-size",
+        type=int,
+        default=8,
         help="Evaluation batch size (default: 8)",
     )
     args = parser.parse_args()

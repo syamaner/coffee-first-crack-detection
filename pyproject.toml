@@ -83,7 +83,8 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "ANN", "B", "SIM"]
-ignore = ["ANN101", "ANN102"]
+# ANN101/ANN102 (missing self/cls annotation) were removed from ruff upstream;
+# nothing left to ignore here.
 
 [tool.ruff.format]
 quote-style = "double"

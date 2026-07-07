@@ -15,7 +15,6 @@ from coffee_first_crack.inference import (
     _format_time,
 )
 
-
 # ── _format_time ──────────────────────────────────────────────────────────────
 
 

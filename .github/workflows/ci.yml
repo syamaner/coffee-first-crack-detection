@@ -11,8 +11,7 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  # Full-dependency test suite (the repo's own gate today: pytest only — see
-  # the note below on ruff/pyright). Installs the `all` extra (train + export +
+  # Full-dependency test suite. Installs the `all` extra (train + export +
   # dev + inference, i.e. torch/transformers included) because dataset.py,
   # inference.py, model.py etc. import torch at module scope and the test
   # suite exercises them directly.
@@ -46,14 +45,38 @@ jobs:
       - name: Run tests with coverage
         run: python -m pytest --cov-report=term-missing:skip-covered
 
-      # NOTE (#57): `ruff check .`, `ruff format --check .`, and `pyright` all
-      # currently fail on `main` (28 ruff lint errors, 9 files needing
-      # `ruff format`, 27 pyright errors — verified 7 Jul 2026, before this
-      # workflow was added). Wiring them here would open this PR red, which
-      # the issue explicitly says not to do. pytest is the one gate the repo
-      # actually passes today (144 passed), so it is the only one wired as a
-      # blocking job. Follow-up: clean up lint/format/typecheck on `main` (own
-      # PR — this one is CI config only) and then add those as gates too.
+  # Lint / format / typecheck gate (#59). Cleaned up on `main` 7 Jul 2026 (28
+  # ruff lint errors, 9 files needing `ruff format`, 27 pyright errors, all
+  # fixed — see docs/state or the #59 PR for the before/after). Installs the
+  # same `all` extra as `test` because pyright needs torch/transformers on the
+  # path to type-check dataset.py, inference.py, model.py, train.py etc.
+  lint:
+    name: Lint (ruff + pyright)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[all]"
+
+      - name: ruff check
+        run: python -m ruff check .
+
+      - name: ruff format --check
+        run: python -m ruff format --check .
+
+      - name: pyright
+        run: python -m pyright src/
 
   # The torch-free import gate (#57 headline). Installs ONLY requirements-pi.txt
   # (no torch, no transformers — the Raspberry Pi 5 dependency set, D27 Phase 1)
