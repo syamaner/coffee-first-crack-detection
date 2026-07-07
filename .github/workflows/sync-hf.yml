@@ -1,0 +1,149 @@
+# Sync the model card, dataset card, and Space files to HuggingFace Hub.
+#
+# INERT UNTIL CONFIGURED: this workflow requires the `HF_TOKEN` repository
+# secret (a HuggingFace write token). Until an operator (a human) adds that
+# secret, the very first step below detects its absence, logs a clear
+# message, and exits 0 (green) without attempting any upload. No HF repo is
+# touched, no push happens, and CI never goes red because the secret is
+# missing — see the "check-secret" step in the `sync` job.
+#
+# Required secret:
+#   HF_TOKEN — a HuggingFace access token with WRITE scope to all three of
+#   the repos below:
+#     - syamaner/coffee-first-crack-detection   (model repo, also hosts the Space)
+#     - syamaner/coffee-first-crack-audio       (dataset repo)
+#     - syamaner/coffee-first-crack-detection   (space repo, repo_type=space —
+#       same repo id as the model repo, distinguished on HF by repo_type)
+#
+# Source -> destination mapping (from issue #34):
+#
+#   | Source file(s)          | HF repo                                  | repo_type | Destination path |
+#   |--------------------------|------------------------------------------|-----------|-------------------|
+#   | README.md                | syamaner/coffee-first-crack-detection     | model     | README.md         |
+#   | data/DATASET_CARD.md      | syamaner/coffee-first-crack-audio         | dataset   | README.md (renamed) |
+#   | spaces/app.py             | syamaner/coffee-first-crack-detection     | space     | app.py            |
+#   | spaces/README.md          | syamaner/coffee-first-crack-detection     | space     | README.md         |
+#   | spaces/requirements.txt   | syamaner/coffee-first-crack-detection     | space     | requirements.txt  |
+#
+# Uploads use `huggingface_hub.HfApi().upload_file(...)`, which is naturally
+# idempotent: HF only creates a new commit on the target repo when the
+# uploaded content actually differs from what's already there, so re-running
+# this workflow with unchanged files is a safe no-op.
+#
+# To enable auto-sync: add the `HF_TOKEN` repository secret. No other change
+# is required — this workflow does nothing until that secret exists.
+
+name: Sync HuggingFace cards and Space
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "README.md"
+      - "data/DATASET_CARD.md"
+      - "spaces/**"
+
+concurrency:
+  group: sync-hf-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync HF cards and Space
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check for HF_TOKEN secret
+        id: check-secret
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "HF_TOKEN not configured; skipping sync"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "HF_TOKEN found; proceeding with sync"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out repository
+        if: steps.check-secret.outputs.skip != 'true'
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Python
+        if: steps.check-secret.outputs.skip != 'true'
+        uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install huggingface_hub
+        if: steps.check-secret.outputs.skip != 'true'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "huggingface_hub>=0.20.0,<1.0" "pyyaml>=6.0"
+
+      - name: Validate model card frontmatter
+        if: steps.check-secret.outputs.skip != 'true'
+        run: |
+          python -c "
+          from pathlib import Path
+
+          import yaml
+
+          readme = Path('README.md')
+          content = readme.read_text()
+          if not content.startswith('---'):
+              raise ValueError(\"README.md is missing YAML frontmatter (expected '---' at start)\")
+
+          parts = content.split('---', 2)
+          if len(parts) < 3:
+              raise ValueError(\"README.md frontmatter is malformed (missing closing '---')\")
+
+          metadata = yaml.safe_load(parts[1])
+          required = {'pipeline_tag', 'license', 'base_model'}
+          missing = required - set(metadata or {})
+          if missing:
+              raise ValueError(f'README.md frontmatter missing required fields: {missing}')
+
+          print('Model card YAML frontmatter is valid.')
+          "
+
+      - name: Sync cards and Space files to HuggingFace Hub
+        if: steps.check-secret.outputs.skip != 'true'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python -c "
+          import os
+
+          from huggingface_hub import HfApi
+
+          token = os.environ['HF_TOKEN']
+          api = HfApi(token=token)
+
+          # (local path, repo_id, repo_type, path_in_repo)
+          uploads = [
+              ('README.md', 'syamaner/coffee-first-crack-detection', 'model', 'README.md'),
+              ('data/DATASET_CARD.md', 'syamaner/coffee-first-crack-audio', 'dataset', 'README.md'),
+              ('spaces/app.py', 'syamaner/coffee-first-crack-detection', 'space', 'app.py'),
+              ('spaces/README.md', 'syamaner/coffee-first-crack-detection', 'space', 'README.md'),
+              ('spaces/requirements.txt', 'syamaner/coffee-first-crack-detection', 'space', 'requirements.txt'),
+          ]
+
+          for local_path, repo_id, repo_type, path_in_repo in uploads:
+              print(f'Uploading {local_path} -> {repo_id} ({repo_type}) as {path_in_repo}')
+              api.upload_file(
+                  path_or_fileobj=local_path,
+                  path_in_repo=path_in_repo,
+                  repo_id=repo_id,
+                  repo_type=repo_type,
+                  token=token,
+              )
+          print('Sync complete.')
+          "
+
+      - name: Sync skipped
+        if: steps.check-secret.outputs.skip == 'true'
+        run: echo "HF_TOKEN not configured; skipping sync (this is expected until the operator adds the secret)."
