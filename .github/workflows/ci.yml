@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # Full-dependency test suite (the repo's own gate today: pytest only — see
+  # the note below on ruff/pyright). Installs the `all` extra (train + export +
+  # dev + inference, i.e. torch/transformers included) because dataset.py,
+  # inference.py, model.py etc. import torch at module scope and the test
+  # suite exercises them directly.
+  test:
+    name: Test (pytest)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # sounddevice (the `inference` extra, imported by scripts/record_mics.py
+      # and its test) needs the PortAudio runtime library at import time, even
+      # though CI never opens a real audio device. Without it, test collection
+      # fails with "OSError: PortAudio library not found" (verified on a clean
+      # ubuntu-latest-equivalent container).
+      - name: Install system libraries (PortAudio for sounddevice)
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[all]"
+
+      - name: Run tests with coverage
+        run: python -m pytest --cov-report=term-missing:skip-covered
+
+      # NOTE (#57): `ruff check .`, `ruff format --check .`, and `pyright` all
+      # currently fail on `main` (28 ruff lint errors, 9 files needing
+      # `ruff format`, 27 pyright errors — verified 7 Jul 2026, before this
+      # workflow was added). Wiring them here would open this PR red, which
+      # the issue explicitly says not to do. pytest is the one gate the repo
+      # actually passes today (144 passed), so it is the only one wired as a
+      # blocking job. Follow-up: clean up lint/format/typecheck on `main` (own
+      # PR — this one is CI config only) and then add those as gates too.
+
+  # The torch-free import gate (#57 headline). Installs ONLY requirements-pi.txt
+  # (no torch, no transformers — the Raspberry Pi 5 dependency set, D27 Phase 1)
+  # plus the package itself with --no-deps (so installing the package doesn't
+  # pull pyproject.toml's core `dependencies`, which include torch). Then
+  # asserts inference_onnx (and the modules it depends on: events, mel_frontend)
+  # import cleanly AND that the import never pulled torch/transformers into
+  # sys.modules, plus a hermetic (no network, no fixtures) MelFrontend forward
+  # pass to prove the ONNX/mel path actually runs, not just imports.
+  #
+  # This is exactly the gate that would have caught the #56 review blocker:
+  # `__init__.py` used to eagerly import the torch-dependent submodules, so
+  # `import coffee_first_crack.inference_onnx` raised ModuleNotFoundError on a
+  # torch-free interpreter. D27 Phase 1 (#56) fixed this with lazy __getattr__
+  # imports in __init__.py; this job is the regression guard.
+  torch-free-import:
+    name: Torch-free import gate (Raspberry Pi 5 deps)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Raspberry Pi (torch-free) dependencies only
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-pi.txt
+          # --no-deps: install only the package's own code onto the path.
+          # Installing with full deps would resolve pyproject.toml's core
+          # `dependencies` list, which includes torch — defeating the point
+          # of this job.
+          python -m pip install -e . --no-deps
+
+      - name: Assert torch and transformers are not installed
+        run: |
+          python -c "
+          import importlib.util
+          for pkg in ('torch', 'transformers'):
+              assert importlib.util.find_spec(pkg) is None, f'{pkg} must not be installed in this job'
+          print('Confirmed: torch and transformers are absent from this interpreter.')
+          "
+
+      - name: Import the ONNX inference entrypoint torch-free
+        run: |
+          python -c "
+          import sys
+
+          import coffee_first_crack.events
+          import coffee_first_crack.mel_frontend
+          import coffee_first_crack.inference_onnx as m
+
+          leaked = sorted(
+              mod for mod in sys.modules
+              if mod.split('.')[0] in ('torch', 'transformers')
+          )
+          assert not leaked, f'torch/transformers imported transitively: {leaked}'
+
+          assert hasattr(m, 'OnnxSlidingWindowInference')
+          assert hasattr(m, 'OnnxFirstCrackDetector')
+          print('OK: coffee_first_crack.inference_onnx imports torch-free.')
+          "
+
+      - name: Run a hermetic torch-free mel-frontend forward pass
+        # No network, no HF download, no fixtures: constructs MelFrontend
+        # directly (bypassing from_config's HF-published preprocessor_config.json)
+        # so the smoke stays fast and deterministic while still exercising the
+        # real numpy/scipy feature-extraction path end to end.
+        run: |
+          python -c "
+          import sys
+
+          import numpy as np
+
+          from coffee_first_crack.mel_frontend import MelFrontend
+
+          frontend = MelFrontend(
+              mean=-4.2677393,
+              std=4.5689974,
+              num_mel_bins=128,
+              sampling_rate=16000,
+              max_length=1024,
+          )
+          window = (np.random.randn(160_000) * 0.05).astype(np.float32)
+          out = frontend.extract(window)
+          assert out.shape == (1024, 128), out.shape
+          assert out.dtype == np.float32
+
+          leaked = sorted(
+              mod for mod in sys.modules
+              if mod.split('.')[0] in ('torch', 'transformers')
+          )
+          assert not leaked, f'torch/transformers imported transitively: {leaked}'
+          print('OK: MelFrontend forward pass ran torch-free.')
+          "

@@ -143,6 +143,28 @@ pyright src/
 
 ---
 
+## Continuous Integration
+
+`.github/workflows/ci.yml` runs on every push and pull request:
+
+- **`test`** — installs `.[all]` (torch/transformers included) and runs
+  `pytest` with coverage. This is currently the only *blocking* gate: as of
+  the CI being added (#57), `ruff check`, `ruff format --check`, and `pyright`
+  all fail on pre-existing `main` content, so they are not wired as required
+  jobs yet (a red gate the code doesn't pass is worse than no gate — see the
+  in-file comment). Clean those up in a follow-up PR, then add them here.
+- **`torch-free-import`** — the load-bearing gate #57 exists for. Installs
+  only `requirements-pi.txt` (the Raspberry Pi 5 / torch-free dependency set,
+  D27 Phase 1) plus the package with `--no-deps`, then asserts
+  `coffee_first_crack.inference_onnx` (and `events`, `mel_frontend`) import
+  cleanly with torch/transformers absent from `sys.modules`, plus a hermetic
+  `MelFrontend` forward-pass smoke (no network, no fixtures). This is the
+  regression guard for the #56 review blocker, where `__init__.py` eagerly
+  imported torch-dependent submodules and broke `inference_onnx` on a
+  torch-free Pi interpreter.
+
+---
+
 ## Codebase Architecture
 
 ```
