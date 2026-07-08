@@ -215,8 +215,10 @@ python scripts/push_to_hub.py \
 > checkpoint than baseline_v5 — the 93.3%/0.933 figures are that checkpoint's numbers, not
 > stale baseline_v5 numbers. The current published model (baseline_v5, HF Hub) scores
 > **97.7% acc / 0.921 F1 / 87.2% precision / 97.6% recall / 0.997 ROC-AUC** (1 FN, 6 FP on the
-> 303-sample test set) — identical between PyTorch and ONNX (FP32/INT8) inference, per D27's
-> numeric-equivalence guarantee (`tests/test_mel_frontend.py::test_numeric_mel_diff_vs_ast`).
+> 303-sample test set) — these are the PyTorch/AST model. For the torch-free path, D27 proves the
+> numpy/scipy `MelFrontend` reproduces AST's Kaldi mel **front-end** numerically
+> (`tests/test_mel_frontend.py::test_numeric_mel_diff_vs_ast`, ~2.7e-5 max diff) — i.e. the *feature
+> extraction* is equivalent, NOT the full quantized-model output (INT8 quantization is lossy).
 > A from-scratch ONNX latency/quality re-benchmark on baseline_v5 has not been re-run since
 > the D27 torch-free front-end landed; no specific ONNX INT8 parity number for baseline_v5 is
 > recorded here — treat the latency figures above as directional (RPi5 thread/PSU/thermal

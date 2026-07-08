@@ -143,7 +143,7 @@ detector.start()
 ### ONNX (Raspberry Pi 5) — torch-free
 
 ONNX models are published on HuggingFace Hub under `onnx/fp32/` and `onnx/int8/`:
-- **INT8 (recommended)**: `onnx/int8/model_quantized.onnx` — 90MB, 2x faster, zero quality loss
+- **INT8 (recommended)**: `onnx/int8/model_quantized.onnx` — 90MB, 2x faster, no measurable quality loss (earlier-checkpoint validation, not re-benchmarked on baseline_v5)
 - **FP32**: `onnx/fp32/model.onnx` — 345MB
 
 Pi/ONNX inference uses `coffee_first_crack.inference_onnx.OnnxSlidingWindowInference`, which
@@ -241,7 +241,7 @@ Full dataset: 1,435 × 10s chunks (fixed sliding window), 922 / 210 / 303 train 
 
 ### Raspberry Pi 5 Notes
 
-- Use `model_quantized.onnx` (INT8, 90MB) — 2x faster than FP32 with zero quality loss
+- Use `model_quantized.onnx` (INT8, 90MB) — 2x faster than FP32 with no measurable quality loss (earlier-checkpoint validation, not re-benchmarked on baseline_v5)
 - **Recommended config**: INT8, 2 threads, adequate PSU + active cooler → **p50 = 2,452ms**
 - **Why 2 threads**: the Pi also runs an MCP server and agent UI — 2 ONNX threads leaves 2 cores free for those services
 - **Detection threshold**: 0.90 (precision=0.952, recall=0.909, F1=0.930) — minimises false positives
