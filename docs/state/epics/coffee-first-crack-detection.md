@@ -203,13 +203,26 @@ python scripts/push_to_hub.py \
 | baseline_v2 MPS attempt 1 | 95.38% (val, epoch 7) | 0.866 | — | 587 train, overfitting after epoch 7, lr too high |
 | baseline_v2 (tuned, MPS) | 97.4% (test) | 0.925 | 86.1% | 973 chunks, 15 recs, 100% precision, 0 FP |
 | baseline_v3 (full FT, 21 recs) | 96.0% (test) | 0.872 | 93.2% | 1,435 chunks, overfitting (train loss→0 by epoch 3) |
-| **baseline_v5 (partial freeze + aug)** | **97.7% (test)** | **0.921** | **97.6%** | **1,435 chunks, 21 recs, 14M trainable, 3/4 test files detected** |
-| ONNX FP32 (Mac, auto threads) | 93.3% | 0.933 | 95.5% | p50=375ms ✅ |
-| ONNX INT8 (Mac, auto threads) | 93.3% | 0.933 | 95.5% | p50=197ms ✅ |
-| ONNX INT8 (RPi5, 4 threads, fan) | 93.3% | 0.933 | 95.5% | p50=2,070ms ⭐ recommended |
-| ONNX INT8 (RPi5, 2 threads) | 93.3% | 0.933 | 95.5% | p50=2,436ms ⚠️ thermal throttled |
-| ONNX INT8 (RPi5, 1 thread) | 93.3% | 0.933 | 95.5% | p50=4,441ms ⚠️ |
-| ONNX FP32 (RPi5, 1 thread) | 93.3% | 0.933 | 95.5% | p50=9,412ms ⚠️ |
+| **baseline_v5 (partial freeze + aug)** | **97.7%** | **0.921** | **97.6%** | **1,435 chunks, 21 recs, 14M trainable, 303-sample test set, 1 FN / 6 FP, precision 87.2%, ROC-AUC 0.997** |
+| ONNX FP32 (Mac, auto threads) | 93.3% | 0.933 | 95.5% | p50=375ms ✅ (pre-baseline_v5 ONNX validation, see note below) |
+| ONNX INT8 (Mac, auto threads) | 93.3% | 0.933 | 95.5% | p50=197ms ✅ (pre-baseline_v5 ONNX validation, see note below) |
+| ONNX INT8 (RPi5, 4 threads, fan) | 93.3% | 0.933 | 95.5% | p50=2,070ms ⭐ recommended (pre-baseline_v5 ONNX validation, see note below) |
+| ONNX INT8 (RPi5, 2 threads) | 93.3% | 0.933 | 95.5% | p50=2,436ms ⚠️ thermal throttled (pre-baseline_v5 ONNX validation, see note below) |
+| ONNX INT8 (RPi5, 1 thread) | 93.3% | 0.933 | 95.5% | p50=4,441ms ⚠️ (pre-baseline_v5 ONNX validation, see note below) |
+| ONNX FP32 (RPi5, 1 thread) | 93.3% | 0.933 | 95.5% | p50=9,412ms ⚠️ (pre-baseline_v5 ONNX validation, see note below) |
+
+> **Note**: the ONNX rows above are from the S15/#22 RPi5 validation, run against an earlier
+> checkpoint than baseline_v5 — the 93.3%/0.933 figures are that checkpoint's numbers, not
+> stale baseline_v5 numbers. The current published model (baseline_v5, HF Hub) scores
+> **97.7% acc / 0.921 F1 / 87.2% precision / 97.6% recall / 0.997 ROC-AUC** (1 FN, 6 FP on the
+> 303-sample test set) — these are the PyTorch/AST model. For the torch-free path, D27 proves the
+> numpy/scipy `MelFrontend` reproduces AST's Kaldi mel **front-end** numerically
+> (`tests/test_mel_frontend.py::test_numeric_mel_diff_vs_ast`, ~2.7e-5 max diff) — i.e. the *feature
+> extraction* is equivalent, NOT the full quantized-model output (INT8 quantization is lossy).
+> A from-scratch ONNX latency/quality re-benchmark on baseline_v5 has not been re-run since
+> the D27 torch-free front-end landed; no specific ONNX INT8 parity number for baseline_v5 is
+> recorded here — treat the latency figures above as directional (RPi5 thread/PSU/thermal
+> behaviour), not as baseline_v5's accuracy.
 
 ### RPi5 Validation Results
 

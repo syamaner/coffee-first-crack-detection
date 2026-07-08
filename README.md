@@ -140,47 +140,31 @@ detector.start()
 # poll detector.is_first_crack() in your roast loop
 ```
 
-### ONNX (Raspberry Pi 5)
+### ONNX (Raspberry Pi 5) — torch-free
 
 ONNX models are published on HuggingFace Hub under `onnx/fp32/` and `onnx/int8/`:
-- **INT8 (recommended)**: `onnx/int8/model_quantized.onnx` — 90MB, 2x faster, zero quality loss
+- **INT8 (recommended)**: `onnx/int8/model_quantized.onnx` — 90MB, 2x faster, no measurable quality loss (earlier-checkpoint validation, not re-benchmarked on baseline_v5)
 - **FP32**: `onnx/fp32/model.onnx` — 345MB
 
+Pi/ONNX inference uses `coffee_first_crack.inference_onnx.OnnxSlidingWindowInference`, which
+loads the ONNX model and a `MelFrontend` (a hand-written numpy/scipy Kaldi-compatible mel
+filterbank, added in D27) directly from HuggingFace Hub — no `torch` or `transformers`
+required:
+
 ```python
-import onnxruntime as rt
-import numpy as np
-from huggingface_hub import hf_hub_download
-from transformers import ASTFeatureExtractor
-import librosa
+from coffee_first_crack.inference_onnx import OnnxSlidingWindowInference
 
-# Download INT8 model and preprocessor config from HF Hub
-model_path = hf_hub_download(
-    repo_id="syamaner/coffee-first-crack-detection",
-    filename="onnx/int8/model_quantized.onnx",
-)
-extractor = ASTFeatureExtractor.from_pretrained(
-    "syamaner/coffee-first-crack-detection", subfolder="onnx/int8",
-)
-
-# Thread-limit for RPi5 (2 threads — leaves cores free for MCP server + UI)
-sess_options = rt.SessionOptions()
-sess_options.intra_op_num_threads = 2
-sess_options.inter_op_num_threads = 1
-
-sess = rt.InferenceSession(
-    model_path, sess_options=sess_options, providers=["CPUExecutionProvider"]
-)
-
-audio, _ = librosa.load("roast.wav", sr=16000, mono=True)
-inputs = extractor([audio.tolist()], sampling_rate=16000, return_tensors="np")
-logits = sess.run(None, {sess.get_inputs()[0].name: inputs["input_values"]})[0]
-
-# Softmax for probabilities
-exp_logits = np.exp(logits - np.max(logits, axis=-1, keepdims=True))
-probs = exp_logits / exp_logits.sum(axis=-1, keepdims=True)
-label_id = int(np.argmax(probs))
-print(f"first_crack prob: {probs[0, 1]:.3f}")
+# Loads the INT8 model + MelFrontend feature extractor from HF Hub
+inference = OnnxSlidingWindowInference(profile="pi_inference")
+events = inference.process_file("roast.wav")
+for event in events:
+    print(f"First crack at {event.timestamp_str}")
 ```
+
+`MelFrontend` reproduces `ASTFeatureExtractor`'s Kaldi fbank computation using only `numpy`
+and `scipy.signal` — it is **not** `librosa`-based. `librosa`'s mel filterbank cannot
+reproduce Kaldi-style features (a different filter construction entirely), so it is used
+only for audio I/O (`librosa.load`) on this path, never for feature extraction.
 
 > **Note**: RPi5 requires adequate PSU (5V/5A recommended) and active cooling.
 > Default is 2 ONNX threads to leave CPU headroom for MCP server and agent UI.
@@ -257,7 +241,7 @@ Full dataset: 1,435 × 10s chunks (fixed sliding window), 922 / 210 / 303 train 
 
 ### Raspberry Pi 5 Notes
 
-- Use `model_quantized.onnx` (INT8, 90MB) — 2x faster than FP32 with zero quality loss
+- Use `model_quantized.onnx` (INT8, 90MB) — 2x faster than FP32 with no measurable quality loss (earlier-checkpoint validation, not re-benchmarked on baseline_v5)
 - **Recommended config**: INT8, 2 threads, adequate PSU + active cooler → **p50 = 2,452ms**
 - **Why 2 threads**: the Pi also runs an MCP server and agent UI — 2 ONNX threads leaves 2 cores free for those services
 - **Detection threshold**: 0.90 (precision=0.952, recall=0.909, F1=0.930) — minimises false positives
@@ -265,7 +249,9 @@ Full dataset: 1,435 × 10s chunks (fixed sliding window), 922 / 210 / 303 train 
 - **Cooling**: active cooler recommended — sustained 2-thread load without fan reaches 77°C+ and triggers thermal throttling
 - **Threads**: 2 threads with fan (2,452ms), 4 threads with fan (2,070ms), 1 thread on any PSU (4,441ms)
 - **Latency target**: current AST model (87M params) does not meet the <500ms target on RPi5. Consider a lighter model for real-time edge use
-- Install: `pip install -r requirements-pi.txt` then `pip install torch --index-url https://download.pytorch.org/whl/cpu`
+- Install: `pip install -r requirements-pi.txt` — no `torch` install needed. Pi/ONNX inference
+  uses a numpy/scipy Kaldi-compatible mel front-end (`MelFrontend`, D27) instead of the
+  `transformers`/`torch`-based `ASTFeatureExtractor`
 
 ---
 
