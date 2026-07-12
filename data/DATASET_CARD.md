@@ -15,11 +15,11 @@ dataset_info:
     dtype: string
   splits:
   - name: train
-    num_examples: 587
+    num_examples: 922
   - name: val
-    num_examples: 195
+    num_examples: 210
   - name: test
-    num_examples: 191
+    num_examples: 303
 task_categories:
   - audio-classification
 language:
@@ -49,18 +49,20 @@ Audio dataset for training coffee first crack detection models. Contains 10-seco
 > **Original prototype:**
 > - Part 1 — [Training a Neural Network to Detect Coffee First Crack from Audio](https://dev.to/syamaner/part-1-training-a-neural-network-to-detect-coffee-first-crack-from-audio-an-agentic-development-1jei)
 
+> **Last updated:** 12 Jul 2026 (baseline_v5, 303-sample test set).
+
 ## Dataset Summary
 
-- **973 total chunks** (fixed 10-second sliding windows, no overlap)
-- **15 source recordings** from 2 microphones, 3 coffee origins
+- **1,435 total chunks** (fixed 10-second sliding windows, no overlap)
+- **21 source recordings** from 4 microphone configurations, 4 coffee origins
 - **Recording-level split** (no data leakage between splits)
-- **20% first_crack / 80% no_first_crack** — realistic class imbalance
+- **~16% first_crack / ~84% no_first_crack** — realistic class imbalance
 
 | Split | first_crack | no_first_crack | Total | Recordings |
 |-------|-------------|----------------|-------|------------|
-| Train | 124 | 463 | 587 | 9 |
-| Val | 37 | 158 | 195 | 3 |
-| Test | 36 | 155 | 191 | 3 |
+| Train | 136 | 786 | 922 | 14 |
+| Val | 45 | 165 | 210 | 3 |
+| Test | 42 | 261 | 303 | 4 |
 
 ## Annotation Approach
 
@@ -75,17 +77,23 @@ This approach replaces the prototype method of manually annotating 20-30 small r
 | `audio` | Audio (16kHz) | 10-second mono WAV chunk |
 | `label` | string | `first_crack` or `no_first_crack` |
 | `label_id` | int | 1 = first_crack, 0 = no_first_crack |
-| `microphone` | string | `mic-1-original` or `mic-2-new` |
-| `coffee_origin` | string | e.g. `brazil`, `costarica-hermosa`, `brazil-santos` |
+| `microphone` | string | e.g. `mic-1-original`, `mic-2-new`, `mic-1-new`, `mic-2-new` |
+| `coffee_origin` | string | e.g. `brazil`, `costarica-hermosa`, `brazil-santos`, `panama-hortigal-estate` |
 
 ## Source Recordings
 
+Current baseline (**baseline_v5**, 21 recordings): 9 legacy mic-1 + 6 amplified
+mic-2 + 3 mic-1-panama + 3 mic-2-panama. Reconciled against
+`data/splits/split_report.md` on 12 Jul 2026.
+
 | Mic | Origin | Recordings | Notes |
 |-----|--------|------------|-------|
-| mic-1-original | costarica-hermosa | 5 | Legacy recordings from prototype |
-| mic-1-original | brazil | 4 | Legacy recordings from prototype |
-| mic-2-new | brazil | 4 | New recordings (Feb 2026) |
-| mic-2-new | brazil-santos | 2 | New recordings (Apr 2026) |
+| mic-1-original | costarica-hermosa | 5 | Legacy recordings from prototype (4 `hp-a` + 1 `.alog`) |
+| mic-1-original | brazil | 4 | Legacy recordings from prototype (`.alog`) |
+| mic-2-new | brazil | 4 | Single-mic recordings (Feb 2026), gain-amplified |
+| mic-2-new | brazil-santos | 2 | Single-mic recordings (Apr 2026), gain-amplified |
+| mic-1-new (FIFINE) | panama-hortigal-estate | 3 | Multi-mic paired recordings |
+| mic-2-new (ATR2100x) | panama-hortigal-estate | 3 | Multi-mic paired recordings |
 
 ## Usage
 
@@ -95,9 +103,9 @@ from datasets import load_dataset
 ds = load_dataset("syamaner/coffee-first-crack-audio")
 print(ds)
 # DatasetDict({
-#     train: Dataset({features: [audio, label, ...], num_rows: 587})
-#     val: Dataset({features: [audio, label, ...], num_rows: 195})
-#     test: Dataset({features: [audio, label, ...], num_rows: 191})
+#     train: Dataset({features: [audio, label, ...], num_rows: 922})
+#     val: Dataset({features: [audio, label, ...], num_rows: 210})
+#     test: Dataset({features: [audio, label, ...], num_rows: 303})
 # })
 
 # Access a sample
