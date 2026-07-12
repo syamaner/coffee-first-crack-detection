@@ -1,0 +1,28 @@
+{
+  "model": "model.onnx",
+  "model_size_mb": 345.0,
+  "threads": 2,
+  "n_samples": 303,
+  "accuracy": 0.9802,
+  "f1": 0.9318,
+  "precision": 0.8913,
+  "recall_first_crack": 0.9762,
+  "roc_auc": 0.9979,
+  "confusion_matrix": [
+    [
+      256,
+      5
+    ],
+    [
+      1,
+      41
+    ]
+  ],
+  "latency": {
+    "p50_ms": 1340.050833998248,
+    "p95_ms": 1378.4978160401806,
+    "mean_ms": 1344.8430145483637,
+    "min_ms": 1332.266499986872,
+    "max_ms": 1404.568708036095
+  }
+}

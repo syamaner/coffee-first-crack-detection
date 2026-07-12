@@ -34,19 +34,19 @@ model-index:
       split: test
     metrics:
     - type: accuracy
-      value: 0.977
+      value: 0.980
       name: Test Accuracy
     - type: f1
-      value: 0.921
+      value: 0.932
       name: Test F1 (macro)
     - type: precision
-      value: 0.872
+      value: 0.891
       name: Test Precision (first_crack)
     - type: recall
       value: 0.976
       name: Test Recall (first_crack)
     - type: roc_auc
-      value: 0.997
+      value: 0.998
       name: Test ROC-AUC
 ---
 
@@ -196,14 +196,46 @@ Training hardware: Apple M3+ Mac (MPS). Dataset: 1,435 fixed 10s chunks from 21 
 
 **baseline_v5** — 21 recordings (9 legacy + 6 amplified mic-2 + 3 mic-1-panama + 3 mic-2-panama), Apple M3 Mac (MPS).
 
-| Metric | Test |
-|--------|------|
-| Accuracy | **97.7%** |
-| F1 (macro) | **0.921** |
-| Precision (`first_crack`) | 87.2% |
-| Recall (`first_crack`) | **97.6%** |
-| ROC-AUC | **0.997** |
-| Confusion matrix | 1 FN, 6 FP (303 test samples) |
+> **Provenance note (12 Jul, #55):** the table below was re-measured from a clean run against the
+> checkpoint and test split currently on disk, after two different FP counts had been reported
+> from earlier runs ("1 FN, 6 FP" here vs "4 FP" in issue #55). Root cause: the committed
+> `experiments/baseline_v5/evaluation/test_results.json` predates a regeneration of
+> `data/splits/test/` from later the same session (checkpoint `model.safetensors` written
+> 21:26, that eval run 21:43, test-split WAVs rewritten 21:56) — it was scored against a
+> since-replaced version of the split, not the current one. The "4 FP" figure in #55 is real but
+> is the **ONNX INT8** export's number, not the PyTorch/AST checkpoint's — two different,
+> legitimate configurations, not a bug. Both rows below were reproduced twice (deterministic,
+> `crop_mode="center"`) against `data/splits/test/` (303 samples, 42 `first_crack` / 261
+> `no_first_crack`) as of this checkpoint.
+
+| Metric | AST / PyTorch (fp32) | ONNX INT8 |
+|--------|----------------------|-----------|
+| Accuracy | **98.0%** | **98.3%** |
+| F1 (macro) | **0.932** | **0.943** |
+| Precision (`first_crack`) | 89.1% | 91.1% |
+| Recall (`first_crack`) | **97.6%** | **97.6%** |
+| ROC-AUC | **0.9979** | **0.9976** |
+| Confusion matrix | 1 FN, 5 FP | 1 FN, 4 FP |
+
+ROC-AUC shown to 4 decimals rather than the usual 3 — rounding to 3 makes both columns read
+"0.998" and visually erases INT8's (tiny, expected) AUC dip relative to fp32.
+
+The AST/PyTorch confusion matrix (256 TN / 5 FP / 1 FN / 41 TP) is not part of
+`evaluate.py`'s JSON output (`MetricsCalculator.compute()` only returns scalar metrics) — it's
+read from that run's own `test_results.txt` / `confusion_matrix.png`
+(`experiments/baseline_v5/evaluation/`), not inferred from the ONNX fp32 run. See
+`results/baseline_v5_303set/ast_fp32_eval.json` for the full JSON including this matrix.
+
+Reproduce:
+```bash
+# AST / PyTorch checkpoint
+python -m coffee_first_crack.evaluate \
+  --model-dir experiments/baseline_v5/checkpoint-best --test-dir data/splits/test
+
+# ONNX INT8 export
+python scripts/evaluate_onnx.py \
+  --onnx-dir exports/onnx/int8 --test-dir data/splits/test
+```
 
 Full dataset: 1,435 × 10s chunks (fixed sliding window), 922 / 210 / 303 train / val / test split (recording-level, no data leakage).
 
@@ -234,17 +266,32 @@ Full dataset: 1,435 × 10s chunks (fixed sliding window), 922 / 210 / 303 train 
 
 | Platform | Inference | Latency (10s window) | Model Size | Notes |
 |----------|-----------|---------------------|------------|-------|
-| Apple M3+ Mac | PyTorch (MPS) | ~100ms | 345MB | Auto-detected device |
-| Apple M3+ Mac | ONNX Runtime (CPU) | ~197ms (INT8) / ~375ms (FP32) | 90MB / 345MB | No GPU needed |
+| Apple M3+ Mac | PyTorch (MPS) | ~56ms | 345MB | Auto-detected device |
+| Apple M3+ Mac | ONNX Runtime (CPU) | ~216ms (INT8) / ~429ms (FP32) | 90MB / 345MB | No GPU needed |
 | NVIDIA RTX 4090 | PyTorch (CUDA) | ~30ms | 345MB | fp16/bf16, num_workers=4 |
 | Raspberry Pi 5 (16GB) | ONNX Runtime (CPU) | ~2.45s (INT8, 2 threads) | 90MB | ⭐ Recommended Pi config |
 
+> Mac PyTorch/ONNX rows re-benchmarked 12 Jul on baseline_v5 (`scripts/benchmark_platforms.py
+> --model-dir experiments/baseline_v5/checkpoint-best --onnx-dir exports/onnx --n-runs 30`,
+> dummy 10s audio, p50 of 30 runs after 5 warmup). Absolute numbers will vary by machine/ONNX
+> Runtime version — don't treat these as a hard SLA, only as the relative INT8-vs-FP32 shape.
+> RTX 4090 and RPi5 rows are carried over from earlier hardware-specific validation, not
+> re-run here.
+
 ### Raspberry Pi 5 Notes
 
-- Use `model_quantized.onnx` (INT8, 90MB) — 2x faster than FP32 with no measurable quality loss (earlier-checkpoint validation, not re-benchmarked on baseline_v5)
+- Use `model_quantized.onnx` (INT8, 90MB) — **on this machine, INT8 was ~2x faster than FP32
+  AND scored marginally *better* on quality** (98.3% acc / 91.1% precision / 4 FP vs FP32's
+  98.0% acc / 89.1% precision / 5 FP on the 303-sample test set, both against baseline_v5,
+  12 Jul). That is a quantization-noise-sized difference on one 303-sample set, not a
+  guarantee INT8 always matches or beats FP32 — but on the measured evidence there is no
+  quality loss to trade against the latency win. Supersedes the earlier "no measurable
+  quality loss" claim, which predated a re-benchmark on baseline_v5 (see `results/`
+  eval JSONs for raw output; reproduce with `python scripts/evaluate_onnx.py --onnx-dir
+  exports/onnx/{fp32,int8} --test-dir data/splits/test`).
 - **Recommended config**: INT8, 2 threads, adequate PSU + active cooler → **p50 = 2,452ms**
 - **Why 2 threads**: the Pi also runs an MCP server and agent UI — 2 ONNX threads leaves 2 cores free for those services
-- **Detection threshold**: 0.90 (precision=0.952, recall=0.909, F1=0.930) — minimises false positives
+- **Detection threshold**: 0.90 (precision=0.952, recall=0.909, F1=0.930 — historical RPi5 threshold sweep on the earlier 45-sample test set, see `results/README.md`) — minimises false positives
 - **Power**: adequate PSU (5V/5A recommended) required for multi-thread. Standard chargers (5V/3A) cause under-voltage crashes under load
 - **Cooling**: active cooler recommended — sustained 2-thread load without fan reaches 77°C+ and triggers thermal throttling
 - **Threads**: 2 threads with fan (2,452ms), 4 threads with fan (2,070ms), 1 thread on any PSU (4,441ms)

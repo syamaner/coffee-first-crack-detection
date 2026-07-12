@@ -1,0 +1,22 @@
+{
+  "accuracy": 0.9801980198019802,
+  "precision": 0.8913043478260869,
+  "recall": 0.9761904761904762,
+  "f1": 0.9318181818181818,
+  "precision_no_first_crack": 0.9961089494163424,
+  "precision_first_crack": 0.8913043478260869,
+  "recall_no_first_crack": 0.9808429118773946,
+  "recall_first_crack": 0.9761904761904762,
+  "roc_auc": 0.9979018427294288,
+  "confusion_matrix": [
+    [
+      256,
+      5
+    ],
+    [
+      1,
+      41
+    ]
+  ],
+  "_confusion_matrix_note": "confusion_matrix is not part of evaluate.py MetricsCalculator.compute() JSON output; added here from the same run's confusion_matrix.png / test_results.txt output (experiments/baseline_v5/evaluation/), not inferred from the ONNX fp32 run."
+}
