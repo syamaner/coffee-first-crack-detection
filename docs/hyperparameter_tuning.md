@@ -36,7 +36,11 @@ The Audio Spectrogram Transformer (AST) has ~86 million parameters. Our dataset 
 - **Config**: lr=5e-5, weight_decay=0.1, warmup_steps=250, early_stopping=3
 - **Freeze strategy**: Freeze all AST layers, then unfreeze last 2 transformer layers + final layernorm (~14M trainable / 72M frozen)
 - **Augmentation**: Random amplitude scaling (±30%, 50% probability) + Gaussian noise (amp 0.001–0.005, 50% probability)
-- **Result**: 97.7% test acc, 0.921 F1, 97.6% recall, 87.2% precision, 0.997 ROC-AUC
+- **Result (at training time)**: 97.7% test acc, 0.921 F1, 97.6% recall, 87.2% precision, 0.997
+  ROC-AUC. This eval predates a same-session test-split regeneration and is stale — the
+  reproducible number against the checkpoint and split currently on disk is **98.0% acc, 0.932
+  F1, 97.6% recall, 89.1% precision, 0.998 ROC-AUC** (1 FN, 5 FP; see `README.md`'s Evaluation
+  section and issue #55 for the reconciliation).
 - **Full-file detection**: 3/4 test recordings detected within 8s of ground truth
 - **Why it works**: The frozen early layers preserve general audio feature extraction. The unfrozen last 2 layers adapt high-level representations to the coffee-crack domain. Augmentation prevents amplitude memorisation — critical because mic gain varies across recordings.
 
@@ -69,9 +73,11 @@ The Audio Spectrogram Transformer (AST) has ~86 million parameters. Our dataset 
 
 ### 4. Recall vs Precision Tradeoff
 - v2 had 100% precision / 86% recall — never false-alarmed but missed 14% of cracks
-- v5 has 87% precision / 98% recall — occasionally false-alarms but catches nearly every crack
+- v5 has 89% precision / 98% recall — occasionally false-alarms but catches nearly every crack
+  (see the "Result" bullet above — this section previously cited the stale 87%/6-FP figures
+  the same numbers were corrected to earlier in this file, now measured at 89.1%/5 FP)
 - For a coffee roasting assistant, **recall is more important** — missing first crack ruins the roast, a false alarm just gets ignored
-- The 6 false positives in v5 are acceptable; the 1 false negative is the concern
+- The 5 false positives in v5 are acceptable; the 1 false negative is the concern
 
 ### 5. Early Stopping Patience
 - patience=3 consistently works — the model peaks at epoch 2-3 and degrades after

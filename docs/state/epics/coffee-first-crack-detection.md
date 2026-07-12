@@ -139,8 +139,9 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 - Data augmentation: random amplitude scaling (±30%) + Gaussian noise injection
 - Hyperparams: lr=5e-5, weight_decay=0.1, warmup_steps=250, early_stopping=3
 - Best epoch 2, early stopped epoch 5
-- Test set: **97.7% acc / 0.921 F1 / 87.2% precision / 97.6% recall / 0.997 ROC-AUC**
-- 1 false negative, 6 false positives (42 FC test chunks)
+- Test set (re-measured 12 Jul, #55 — see note below): **98.0% acc / 0.932 F1 / 89.1%
+  precision / 97.6% recall / 0.998 ROC-AUC**
+- 1 false negative, 5 false positives (42 FC test chunks)
 
 **Full-file detection on test set** (sliding window, threshold=0.6, min_pops=5):
 - mic1-panama-roast2: GT 13:09 → detected 13:03 — **-6s** ✅
@@ -150,13 +151,18 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 - Detection rate: 3/4 test files, all detections within 8s of ground truth
 
 **Model on HuggingFace**: https://huggingface.co/syamaner/coffee-first-crack-detection
-- baseline_v5: 97.7% test acc / 0.921 F1 / 97.6% recall / 87.2% precision / 0.997 ROC-AUC
+- baseline_v5: 98.0% test acc / 0.932 F1 / 97.6% recall / 89.1% precision / 0.998 ROC-AUC
+  (re-measured 12 Jul against the checkpoint + 303-sample split currently on disk, #55)
 - Trained on 21 recordings (1,435 chunks), partial freeze + augmentation
 - Pushed 2026-04-12, replacing baseline_v1
 
 **ONNX Models**: exported from baseline_v5 checkpoint, **published to HuggingFace Hub** (2026-04-12)
-- FP32: 345MB → `onnx/fp32/model.onnx` on HF Hub (p50=381ms Mac)
-- INT8: 90MB → `onnx/int8/model_quantized.onnx` on HF Hub (p50=201ms Mac) — recommended for RPi5
+- FP32: 345MB → `onnx/fp32/model.onnx` on HF Hub — quality matches the AST/PyTorch checkpoint
+  exactly (98.0% acc / 89.1% precision / 5 FP); latency p50=429ms on this Mac (re-benchmarked
+  12 Jul, `scripts/benchmark_platforms.py`, dummy audio, 30 runs)
+- INT8: 90MB → `onnx/int8/model_quantized.onnx` on HF Hub — 98.3% acc / 91.1% precision / 4 FP
+  (marginally better than fp32 on this 303-sample set — quantization-noise-sized, not a
+  guarantee); latency p50=216ms on this Mac, ~2x faster than fp32 — recommended for RPi5
 - Config JSONs (`config.json`, `preprocessor_config.json`) also uploaded for `from_pretrained()` support
 
 **RPi5 Validation** (issue #22, branch `feature/22-rpi5-onnx-validation`):
@@ -203,26 +209,29 @@ python scripts/push_to_hub.py \
 | baseline_v2 MPS attempt 1 | 95.38% (val, epoch 7) | 0.866 | — | 587 train, overfitting after epoch 7, lr too high |
 | baseline_v2 (tuned, MPS) | 97.4% (test) | 0.925 | 86.1% | 973 chunks, 15 recs, 100% precision, 0 FP |
 | baseline_v3 (full FT, 21 recs) | 96.0% (test) | 0.872 | 93.2% | 1,435 chunks, overfitting (train loss→0 by epoch 3) |
-| **baseline_v5 (partial freeze + aug)** | **97.7%** | **0.921** | **97.6%** | **1,435 chunks, 21 recs, 14M trainable, 303-sample test set, 1 FN / 6 FP, precision 87.2%, ROC-AUC 0.997** |
-| ONNX FP32 (Mac, auto threads) | 93.3% | 0.933 | 95.5% | p50=375ms ✅ (pre-baseline_v5 ONNX validation, see note below) |
-| ONNX INT8 (Mac, auto threads) | 93.3% | 0.933 | 95.5% | p50=197ms ✅ (pre-baseline_v5 ONNX validation, see note below) |
+| **baseline_v5 (partial freeze + aug)** | **98.0%** | **0.932** | **97.6%** | **1,435 chunks, 21 recs, 14M trainable, 303-sample test set, 1 FN / 5 FP, precision 89.1%, ROC-AUC 0.9979 (re-measured 12 Jul, #55)** |
+| ONNX FP32, baseline_v5 (Mac, 2 threads) | 98.0% | 0.932 | 97.6% | p50=429ms ✅ (re-benchmarked 12 Jul, #55 — matches AST/PyTorch exactly) |
+| ONNX INT8, baseline_v5 (Mac, 2 threads) | 98.3% | 0.943 | 97.6% | p50=216ms ✅ (re-benchmarked 12 Jul, #55 — 4 FP, marginally better precision than fp32) |
 | ONNX INT8 (RPi5, 4 threads, fan) | 93.3% | 0.933 | 95.5% | p50=2,070ms ⭐ recommended (pre-baseline_v5 ONNX validation, see note below) |
 | ONNX INT8 (RPi5, 2 threads) | 93.3% | 0.933 | 95.5% | p50=2,436ms ⚠️ thermal throttled (pre-baseline_v5 ONNX validation, see note below) |
 | ONNX INT8 (RPi5, 1 thread) | 93.3% | 0.933 | 95.5% | p50=4,441ms ⚠️ (pre-baseline_v5 ONNX validation, see note below) |
 | ONNX FP32 (RPi5, 1 thread) | 93.3% | 0.933 | 95.5% | p50=9,412ms ⚠️ (pre-baseline_v5 ONNX validation, see note below) |
 
-> **Note**: the ONNX rows above are from the S15/#22 RPi5 validation, run against an earlier
-> checkpoint than baseline_v5 — the 93.3%/0.933 figures are that checkpoint's numbers, not
-> stale baseline_v5 numbers. The current published model (baseline_v5, HF Hub) scores
-> **97.7% acc / 0.921 F1 / 87.2% precision / 97.6% recall / 0.997 ROC-AUC** (1 FN, 6 FP on the
-> 303-sample test set) — these are the PyTorch/AST model. For the torch-free path, D27 proves the
-> numpy/scipy `MelFrontend` reproduces AST's Kaldi mel **front-end** numerically
-> (`tests/test_mel_frontend.py::test_numeric_mel_diff_vs_ast`, ~2.7e-5 max diff) — i.e. the *feature
-> extraction* is equivalent, NOT the full quantized-model output (INT8 quantization is lossy).
-> A from-scratch ONNX latency/quality re-benchmark on baseline_v5 has not been re-run since
-> the D27 torch-free front-end landed; no specific ONNX INT8 parity number for baseline_v5 is
-> recorded here — treat the latency figures above as directional (RPi5 thread/PSU/thermal
-> behaviour), not as baseline_v5's accuracy.
+> **Note (updated 12 Jul, #55)**: the Mac ONNX rows are now re-benchmarked against baseline_v5
+> (`experiments/baseline_v5/checkpoint-best` → `exports/onnx/{fp32,int8}`, this Mac,
+> `scripts/evaluate_onnx.py` for quality + `scripts/benchmark_platforms.py` for latency, 12 Jul).
+> The **RPi5 rows are still from the earlier S15/#22 validation, run against an earlier
+> checkpoint than baseline_v5** — the 93.3%/0.933 figures are that checkpoint's numbers, not
+> baseline_v5's; no RPi5 hardware was available for this re-benchmark, so those rows remain
+> directional (thread/PSU/thermal behaviour) pending a from-scratch RPi5 re-run on baseline_v5.
+> For the torch-free path, D27 proves the numpy/scipy `MelFrontend` reproduces AST's Kaldi mel
+> **front-end** numerically (`tests/test_mel_frontend.py::test_numeric_mel_diff_vs_ast`,
+> ~2.7e-5 max diff) — i.e. the *feature extraction* is equivalent; the full-model INT8 quality
+> parity question the D27-era note flagged as open is now answered on Mac (see the two ONNX
+> rows above) — INT8 matched or slightly beat fp32 on this 303-sample set, not merely "no loss".
+> See `results/README.md` and `results/baseline_v5_303set/` for raw eval JSON + repro commands,
+> and issue #55 for the discrepancy root cause (a stale committed eval predating a same-session
+> test-split regeneration — see the provenance note above the Evaluation table in `README.md`).
 
 ### RPi5 Validation Results
 
