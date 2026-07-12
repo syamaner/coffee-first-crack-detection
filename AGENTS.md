@@ -229,6 +229,11 @@ After completing a story:
 3. Comment on the GitHub story issue with a delivery summary, then close it
 4. Tick the checkbox in GitHub epic issue #1
 5. Open a PR referencing the story issue
+6. **Merging (12 Jul 2026): `main` is branch-protected** — the three CI jobs
+   (Test, Lint, Torch-free import gate) are required status checks (strict:
+   branch must be up to date), conversation resolution is required, and
+   `enforce_admins` is on. `gh pr merge --auto --squash` is safe again: it
+   waits for the checks. Never merge on red or with unresolved threads.
 
 ---
 
