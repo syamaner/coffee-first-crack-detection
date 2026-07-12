@@ -1,0 +1,28 @@
+{
+  "model": "RandomForestClassifier+MFCC",
+  "seed": 42,
+  "class_weight": "balanced",
+  "n_train_samples": 922,
+  "n_test_samples": 303,
+  "n_mfcc": 20,
+  "accuracy": 0.868,
+  "precision": 0.5294,
+  "recall": 0.4286,
+  "f1": 0.4737,
+  "roc_auc": 0.9036,
+  "confusion_matrix": [
+    [
+      245,
+      16
+    ],
+    [
+      24,
+      18
+    ]
+  ],
+  "latency": {
+    "p50_ms": 7.562415907159448,
+    "p95_ms": 7.976637501269579,
+    "mean_ms": 7.6331532915298
+  }
+}
