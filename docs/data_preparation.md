@@ -1,24 +1,116 @@
 # Data Preparation Guide
 
-Full pipeline from raw Audacity recording to training-ready splits.
+Full pipeline from raw recording to training-ready splits.
 
 ---
 
 ## Overview
 
 ```
-Audacity (.aup3)
-    → Export WAV
-        → Label Studio (annotate first_crack regions)
-            → convert_labelstudio_export.py  (JSON annotations)
-                → chunk_audio.py             (10s WAV chunks)
-                    → dataset_splitter.py    (train/val/test splits)
-                        → data/splits/       (ready for training)
+Raw WAV (from the MCP recorder, or scripts/record_mics.py, or legacy Audacity)
+    → data/raw/ (mic{N}-{origin}-roast{n}.wav, per naming convention)
+        → Label Studio (annotate mic1's first_crack region)
+            → convert_labelstudio_export.py  (per-file JSON annotations)
+                → propagate_annotations.py    (copy mic1 → paired mics)
+                    → chunk_audio.py          (10s WAV chunks)
+                        → dataset_splitter.py (train/val/test splits)
+                            → data/splits/    (ready for training)
 ```
+
+There are three ways raw WAVs land in `data/raw/`. The primary source today is the
+**coffee-roaster-mcp recorder**, which captures every supervised roast
+automatically; `scripts/record_mics.py` is the bench dual-mic flow; and Audacity
+export is the legacy path from the prototype era.
 
 ---
 
-## Step 1 — Export WAV from Audacity
+## Step 1 — Get raw WAVs into `data/raw/`
+
+### 1a. Recordings from the coffee-roaster-mcp recorder (primary source)
+
+During a supervised roast, the `coffee-roaster-mcp` recorder captures audio for
+you (when `recording.enabled` and `recording.autocapture` are set, and after
+`set_recording_metadata` has supplied the origin + roast number). Each roast
+writes a **per-session capture directory** at
+`<export_location>/<session-id>/` — by default
+`<log_dir>/captures/<session-id>/`, which is gitignored so the large WAVs are
+never committed. `<session-id>` is the roast session's run id.
+
+Each session directory contains:
+
+| File | What it is |
+|------|-----------|
+| `mic{N}-{origin}-roast{n}.wav` | One WAV per capture device, 1-based device order. `mic1` is the detector's teed stream. **16 kHz, mono, 16-bit PCM.** |
+| `roast.recording.json` | The recording manifest (schema v2) — see below. |
+| `{origin}-roast{n}-session.json` | An annotation-pipeline session JSON, shape-compatible with `record_mics.py`, so `propagate_annotations.py` (Step 4) reads it directly. |
+
+These WAVs are already at the model's native **16 kHz** (unlike
+`record_mics.py`'s 44.1 kHz), and `chunk_audio.py` resamples internally anyway, so
+they need no special handling: **copy or rename the `mic*.wav` files into
+`data/raw/`** following the naming convention below, and copy the
+`{origin}-roast{n}-session.json` alongside them so annotation propagation works.
+
+The `roast.recording.json` manifest (written by
+`coffee_roaster_mcp.audio._write_recording_sidecar`) has this shape:
+
+```jsonc
+{
+  "schema_version": 2,
+  "session_id": "<run-id>",
+  "recording_started_monotonic_seconds": 1234.56,  // monotonic clock at record start; null if unknown
+  "milestones": {                                   // recording-relative seconds, or null per milestone
+    "first_crack": 512.3,
+    "drop": 640.0
+  },
+  "streams": [                                       // one entry per WAV, device order (index 0 = detector/mic1)
+    {
+      "device": "<device label>",
+      "wav_filename": "mic1-<origin>-roast<n>.wav",
+      "sample_rate": 16000,
+      "channels": 1,
+      "sample_width_bytes": 2,
+      "frame_count": 9600000,
+      "duration_seconds": 600.0
+    }
+    // ...mic2, mic3 as configured
+  ]
+  // The first (detector) stream's fields are also mirrored at the top level
+  // (wav_filename / sample_rate / channels / sample_width_bytes / frame_count /
+  // duration_seconds) as a v1 back-compat convenience.
+}
+```
+
+The manifest is informational for the training pipeline (`chunk_audio.py` and
+`dataset_splitter.py` do not read it); annotation propagation keys on the
+`{origin}-roast{n}-session.json` instead.
+
+### 1b. Recordings from `scripts/record_mics.py` (bench dual-mic)
+
+The dual-mic bench flow records a paired session directly. See
+`docs/multi_mic_setup.md` for the full hardware setup. In brief:
+
+```bash
+python scripts/record_mics.py list-devices
+python scripts/record_mics.py record --origin <bean-slug> --roast-num <n>
+```
+
+Press **Ctrl-C** to stop. This writes, into `data/raw/`:
+
+```
+mic1-<origin>-roast<n>.wav          # detector mic (e.g. FIFINE, ch 0)
+mic2-<origin>-roast<n>.wav          # paired mic (e.g. ATR2100x, ch 1)
+<origin>-roast<n>-session.json      # hardware metadata + the mics list
+```
+
+These WAVs are **44100 Hz**; `chunk_audio.py` resamples to 16 kHz. Sessions
+shorter than 60 s are saved with a `_partial` suffix and excluded by convention.
+The `-session.json` here is the same shape the MCP recorder writes, so Step 4
+propagation works identically.
+
+### 1c. Legacy: Audacity export
+
+The prototype-era recordings were exported by hand from Audacity. Kept for
+reference — new recordings use one of the two flows above.
 
 1. Open your `.aup3` project in Audacity
 2. **File → Export Audio…**
@@ -81,7 +173,7 @@ Only the `first_crack` label is needed. Everything outside annotated regions is 
    - Click and drag on the waveform to draw **one region** from the **first pop** to the **end of consistent cracking**
    - This region typically spans 1–5 minutes of audio
    - You do NOT need to annotate individual pops — one continuous region is correct
-   - The chunking pipeline (Step 4) will slice this into fixed 10-second training windows
+   - The chunking pipeline (Step 5) will slice this into fixed 10-second training windows
 4. Press **Submit** (or Ctrl+Enter) to save the annotation
 5. Move to the next task
 
@@ -116,18 +208,46 @@ python -m coffee_first_crack.data_prep.convert_labelstudio_export \
 
 This produces one `{stem}.json` annotation file per audio file in `data/labels/`.
 
-**Multi-mic recordings:** Only mic1 needs to be annotated in Label Studio (both mics are sample-locked, so timestamps are identical). After converting, propagate annotations to the paired mic2 files:
+For multi-mic sessions, you annotate **mic1 only** in Label Studio; Step 4
+propagates that annotation to the paired mics.
+
+---
+
+## Step 4 — Propagate Annotations to Paired Mics
+
+Multi-mic sessions (from the MCP recorder or `record_mics.py`) capture every mic
+sample-locked, so their first-crack timestamps are identical. Annotate **mic1
+only** in Label Studio, then propagate mic1's converted annotation JSON to every
+paired mic in the session:
 
 ```bash
 python scripts/propagate_annotations.py --dry-run   # preview
-python scripts/propagate_annotations.py              # create mic2 annotation JSONs
+python scripts/propagate_annotations.py              # create mic2..N annotation JSONs
 ```
+
+**How the pairing works.** `propagate_annotations.py` discovers sessions by
+reading the `{origin}-roast{n}-session.json` files in `data/raw` (the
+`--session-dir`). Each session JSON carries `origin`, `roast_num`, `sample_rate`,
+and a `mics` list of `{mic_num, label, file}` entries. The script reads the
+primary mic's annotation JSON (`--primary-mic`, default `1`) from `data/labels`
+and writes an identical annotation JSON — same `annotations`, per-mic
+`audio_file`/`duration` — for every other mic listed in the session. Sessions
+with no paired mics, and mics whose annotation JSON already exists (without
+`--overwrite`), are skipped.
+
+**This is why the `{origin}-roast{n}-session.json` must sit in `data/raw`
+alongside the WAVs** (Step 1). Both the MCP recorder and `record_mics.py` write
+that file in exactly the shape this script expects, so MCP-captured sessions
+propagate automatically — no extra tooling. If a set of paired WAVs has **no**
+session JSON (e.g. hand-assembled from loose files), propagation cannot pair
+them; in that case annotate each mic by hand in Label Studio and run Step 3 per
+file, skipping this step.
 
 See `docs/multi_mic_setup.md` for the full paired-recording workflow.
 
 ---
 
-## Step 4 — Chunk Audio into 10-Second Windows
+## Step 5 — Chunk Audio into 10-Second Windows
 
 ```bash
 python -m coffee_first_crack.data_prep.chunk_audio \
@@ -153,7 +273,7 @@ Chunk filenames encode the source recording and window start time:
 
 ---
 
-## Step 5 — Stratified Train/Val/Test Split
+## Step 6 — Stratified Train/Val/Test Split
 
 ```bash
 python -m coffee_first_crack.data_prep.dataset_splitter \
@@ -176,7 +296,7 @@ data/splits/
 
 ---
 
-## Step 6 — Generate recordings.csv Manifest
+## Step 7 — Generate recordings.csv Manifest
 
 ```bash
 python -c "
@@ -208,13 +328,14 @@ When recording with two microphones, each mic produces an independent WAV file. 
 
 | Source | Mic | Origin | Files | Status |
 |--------|-----|--------|-------|--------|
-| Legacy prototype | mic-1-original | costarica-hermosa | 4 roasts | ✅ Annotated |
-| Legacy prototype | mic-1-original | brazil | 5 roasts | ✅ Annotated |
+| Legacy prototype | mic-1-original | costarica-hermosa | 5 roasts | ✅ Annotated |
+| Legacy prototype | mic-1-original | brazil | 4 roasts | ✅ Annotated |
 | Single-mic recordings | mic-2-new | brazil | 4 roasts | ✅ Annotated |
 | Single-mic recordings | mic-2-new | brazil-santos | 2 roasts | ✅ Annotated |
 | Multi-mic recordings | mic-1-new (fifine) | panama-hortigal-estate | 3 roasts | ✅ Annotated |
 | Multi-mic recordings | mic-2-new (audio-technica) | panama-hortigal-estate | 3 roasts | ✅ Annotated |
 
-**Totals**: 21 recordings → 1,435 chunks (223 first_crack / 1,212 no_first_crack)
+**Totals** (baseline_v5, per `data/splits/split_report.md`): 21 recordings →
+1,435 chunks (223 first_crack / 1,212 no_first_crack).
 
-> When adding new recordings, re-run Steps 3–6 to rebuild the full dataset (the chunker and splitter process all annotation files in `data/labels/`).
+> When adding new recordings, re-run Steps 3–7 to rebuild the full dataset (the chunker and splitter process all annotation files in `data/labels/`).

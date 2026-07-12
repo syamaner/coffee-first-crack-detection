@@ -143,7 +143,7 @@ detector.start()
 ### ONNX (Raspberry Pi 5) — torch-free
 
 ONNX models are published on HuggingFace Hub under `onnx/fp32/` and `onnx/int8/`:
-- **INT8 (recommended)**: `onnx/int8/model_quantized.onnx` — 90MB, 2x faster, no measurable quality loss (earlier-checkpoint validation, not re-benchmarked on baseline_v5)
+- **INT8 (recommended)**: `onnx/int8/model_quantized.onnx` — 90MB, 2x faster, no measurable quality loss. Re-benchmarked on baseline_v5's 303-sample test set (12 Jul 2026): 91.1% precision / 97.6% recall / F1 0.943 on `first_crack`, marginally ahead of fp32 and with no quality loss (see [Evaluation](#evaluation)). Reproduce with `python scripts/evaluate_onnx.py --onnx-dir exports/onnx/int8 --test-dir data/splits/test`.
 - **FP32**: `onnx/fp32/model.onnx` — 345MB
 
 Pi/ONNX inference uses `coffee_first_crack.inference_onnx.OnnxSlidingWindowInference`, which
@@ -247,6 +247,60 @@ Full dataset: 1,435 × 10s chunks (fixed sliding window), 922 / 210 / 303 train 
 | mic2-brazil-roast3-amplified | mic-2 | 10:39 | 10:33 | **-6s** |
 | mic2-panama-roast1 | mic-2 | 11:05 | 10:57 | **-8s** |
 | roast-3-costarica-hermosa-hp-a | mic-1 | 07:19 | MISSED | — |
+
+---
+
+## Retraining & updating metrics
+
+When new recordings are added to the dataset, rebuild the splits (see
+[docs/data_preparation.md](docs/data_preparation.md)), then retrain, evaluate,
+export, and re-benchmark the ONNX export:
+
+```bash
+# 1. Train (reads data/splits, writes a checkpoint under experiments/)
+python -m coffee_first_crack.train --data-dir data/splits --experiment-name baseline_vN
+
+# 2. Evaluate the PyTorch/AST checkpoint on the test split
+python -m coffee_first_crack.evaluate \
+  --model-dir experiments/baseline_vN/checkpoint-best \
+  --test-dir data/splits/test \
+  --output-dir experiments/baseline_vN/evaluation
+
+# 3. Export to ONNX (INT8 quantized by default; --no-quantize to skip)
+python -m coffee_first_crack.export_onnx \
+  --model-dir experiments/baseline_vN/checkpoint-best \
+  --output-dir exports/onnx --quantize
+
+# 4. Re-benchmark the ONNX INT8 export on the SAME test split
+python scripts/evaluate_onnx.py \
+  --onnx-dir exports/onnx/int8 \
+  --test-dir data/splits/test \
+  --output results/baseline_vN_int8_eval.json
+```
+
+The `train-first-crack`, `evaluate-first-crack`, and `export-onnx-first-crack`
+console scripts (declared in `pyproject.toml`) are equivalent to the module
+invocations above.
+
+**After a retrain, update these docs so the numbers match reality:**
+
+- the **Evaluation** table in this README (both fp32 and INT8 columns) and the
+  INT8 note in the [ONNX](#onnx-raspberry-pi-5--torch-free) section;
+- `data/DATASET_CARD.md` (split counts, source-recordings table, and the
+  "Last updated" line) whenever the dataset itself changed.
+
+**What is committed vs published vs ignored:**
+
+- **Committed to git:** the evaluation artifacts under
+  `experiments/<name>/evaluation/` (`test_results.txt` / `.json`,
+  `confusion_matrix.png`) and any `results/*.json` you keep as provenance, plus
+  the doc updates above. Note `data/raw/`, `data/processed/`, `data/splits/`,
+  `experiments/`, `exports/`, and `*.onnx` are **gitignored** (large binaries) —
+  only the small text/JSON eval outputs you explicitly `git add -f` are tracked.
+- **Pushed to HuggingFace Hub:** the model weights and ONNX exports —
+  `python -m coffee_first_crack.train ... --push-to-hub`, or `scripts/push_to_hub.py`.
+- **Left gitignored (local only):** everything under `experiments/` and
+  `exports/` except the small eval artifacts you force-add.
 
 ---
 
