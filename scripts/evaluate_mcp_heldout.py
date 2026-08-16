@@ -1,0 +1,1385 @@
+#!/usr/bin/env python3
+"""Replay pair-safe held-out recordings through the MCP detector adapter.
+
+This is an integration evaluator, not a second detector implementation. It loads
+``coffee_roaster_mcp`` from an explicitly supplied checkout and uses its released
+ONNX backend, detector adapter, detector-paced WAV pipeline, window timing, and
+recent-positive confirmation rule. The agent harness profile is supplied as CLI
+arguments so the recorded result states exactly what was exercised.
+
+Legacy 44.1 kHz recordings are resampled to temporary 16 kHz PCM WAVs because the
+live MCP detector consumes 16 kHz mono audio and deliberately rejects mismatched
+WAV sample rates. Source files are never modified.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib
+import json
+import math
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from collections import defaultdict
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Protocol, cast
+
+import librosa
+import soundfile as sf
+
+from coffee_first_crack.training_provenance import validate_onnx_training_provenance
+
+SAMPLE_RATE = 16_000
+
+
+@dataclass(frozen=True)
+class FirstCrackRegion:
+    """One labelled first-crack interval on a recording's own time axis."""
+
+    start_sec: float
+    end_sec: float
+    alignment_uncertainty_sec: float
+    annotation_source: str
+
+
+@dataclass(frozen=True)
+class HeldOutRecording:
+    """One full recording assigned to the pair-safe test split."""
+
+    pair_id: str
+    origin: str
+    recording_id: str
+    audio_path: Path
+    label_path: Path
+    label_sha256: str
+    mic_num: int | None
+    mic_label: str | None
+    source_sha256: str
+    recording_sidecar_path: Path
+    recording_sidecar_sha256: str
+    stream_start_offset_seconds_relative_to_mic1: float
+    t0_offset_sec: float
+    drop_offset_sec: float
+    region: FirstCrackRegion | None
+
+
+class ResolvedArtifactLike(Protocol):
+    """Artifact attributes consumed from the selected MCP checkout."""
+
+    local_path: Path
+
+
+class ResolvedDetectorArtifactsLike(Protocol):
+    """Resolved detector bundle attributes consumed by this evaluator."""
+
+    onnx_model: ResolvedArtifactLike
+    feature_extractor_config: ResolvedArtifactLike
+
+
+def _sha256(path: Path) -> str:
+    """Return the SHA-256 digest of a local file."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _snapshot_inputs(paths: dict[str, Path]) -> dict[str, dict[str, str]]:
+    """Freeze paths and checksums for every dataset/holdout exposure input."""
+    snapshot: dict[str, dict[str, str]] = {}
+    for name, path in paths.items():
+        resolved = path.resolve()
+        if not resolved.is_file():
+            raise ValueError(f"Missing replay evidence input {name}: {resolved}")
+        snapshot[name] = {"path": str(resolved), "sha256": _sha256(resolved)}
+    return snapshot
+
+
+def _verify_input_snapshot(paths: dict[str, Path], expected: dict[str, dict[str, str]]) -> None:
+    """Fail if an exposure/cohort input changes during discovery or replay."""
+    current = _snapshot_inputs(paths)
+    if current != expected:
+        raise RuntimeError("Replay evidence inputs changed after the protocol was frozen")
+
+
+def _verify_recording_evidence_snapshot(
+    recordings: list[HeldOutRecording], evidence_snapshot: dict[str, dict[str, str]]
+) -> None:
+    """Bind discovered label and timing inputs to the expanded frozen snapshot."""
+    for recording in recordings:
+        sidecar_key = f"recording_sidecar:{recording.pair_id}"
+        if evidence_snapshot[sidecar_key]["sha256"] != recording.recording_sidecar_sha256:
+            raise RuntimeError(
+                f"Recording sidecar changed after discovery: {recording.recording_sidecar_path}"
+            )
+        label_key = f"label:{recording.recording_id}"
+        if evidence_snapshot[label_key]["sha256"] != recording.label_sha256:
+            raise RuntimeError(f"Holdout label changed after discovery: {recording.label_path}")
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    """Read a JSON object or fail with path context."""
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Could not read JSON object {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"Expected a JSON object in {path}")
+    return value
+
+
+def _git_head(repository_root: Path) -> str:
+    """Return a clean repository HEAD using an explicitly resolved Git executable."""
+    git_executable = shutil.which("git")
+    if git_executable is None:
+        raise RuntimeError("Git executable is required to freeze the MCP source revision")
+    # The executable is resolved above, argv is constant, and shell execution is disabled.
+    head = subprocess.run(  # noqa: S603
+        [git_executable, "rev-parse", "HEAD"],
+        cwd=repository_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    status = subprocess.run(  # noqa: S603
+        [git_executable, "status", "--porcelain", "--untracked-files=all"],
+        cwd=repository_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if status:
+        raise RuntimeError(
+            "Selected MCP checkout is dirty; commit or remove all tracked and untracked "
+            "changes before freezing the replay protocol"
+        )
+    return head
+
+
+def _split_recording_ids(
+    split_integrity_path: Path, chunk_manifest_path: Path
+) -> tuple[set[str], set[tuple[str, str]], set[str]]:
+    """Resolve all pair and stream IDs already assigned to dataset splits."""
+    integrity = _read_json(split_integrity_path)
+    try:
+        splits = integrity["splits"]
+        required_splits = {"train", "validation", "test"}
+        required_intersections = {"train_validation", "train_test", "validation_test"}
+        intersections = integrity["pair_id_intersections"]
+        schema_version = integrity.get("schema_version")
+        if (
+            not isinstance(schema_version, int)
+            or isinstance(schema_version, bool)
+            or schema_version != 1
+            or integrity.get("strategy") != "pair_id"
+            or integrity.get("integrity_passed") is not True
+            or not isinstance(splits, dict)
+            or set(splits) != required_splits
+            or not isinstance(intersections, dict)
+            or set(intersections) != required_intersections
+            or any(intersections[name] != [] for name in required_intersections)
+        ):
+            raise ValueError("Incomplete or failed split-integrity schema")
+        pair_ids_by_split: dict[str, set[str]] = {}
+        expected_streams = 0
+        for split_name in sorted(required_splits):
+            split = splits[split_name]
+            raw_pair_ids = split["pair_ids"]
+            stream_count = split["stream_recording_count"]
+            physical_count = split["physical_session_count"]
+            if (
+                not isinstance(raw_pair_ids, list)
+                or any(
+                    not isinstance(pair_id, str) or not pair_id or pair_id != pair_id.strip()
+                    for pair_id in raw_pair_ids
+                )
+                or len(set(raw_pair_ids)) != len(raw_pair_ids)
+                or not isinstance(stream_count, int)
+                or isinstance(stream_count, bool)
+                or stream_count < 0
+                or not isinstance(physical_count, int)
+                or isinstance(physical_count, bool)
+                or physical_count != len(raw_pair_ids)
+            ):
+                raise ValueError(f"Malformed {split_name} split summary")
+            pair_ids_by_split[split_name] = set(raw_pair_ids)
+            expected_streams += stream_count
+        computed_intersections = {
+            "train_validation": pair_ids_by_split["train"] & pair_ids_by_split["validation"],
+            "train_test": pair_ids_by_split["train"] & pair_ids_by_split["test"],
+            "validation_test": pair_ids_by_split["validation"] & pair_ids_by_split["test"],
+        }
+        if any(computed_intersections.values()):
+            raise ValueError("Split-integrity pair intersections are not empty")
+        split_pair_ids = set().union(*pair_ids_by_split.values())
+        top_physical_count = integrity.get("physical_session_count")
+        top_stream_count = integrity.get("stream_recording_count")
+        if (
+            not isinstance(top_physical_count, int)
+            or isinstance(top_physical_count, bool)
+            or not isinstance(top_stream_count, int)
+            or isinstance(top_stream_count, bool)
+            or top_physical_count != len(split_pair_ids)
+            or top_stream_count != expected_streams
+        ):
+            raise ValueError("Split-integrity top-level counts do not match partitions")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"Malformed split integrity report {split_integrity_path}") from exc
+
+    resolved: set[tuple[str, str]] = set()
+    source_hash_by_recording: dict[tuple[str, str], str] = {}
+    try:
+        lines = chunk_manifest_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise ValueError(f"Could not read chunk manifest {chunk_manifest_path}: {exc}") from exc
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+            pair_id = str(row["pair_id"])
+            recording_id = str(row["recording_id"])
+            source_sha256 = str(row["source_audio_sha256"])
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise ValueError(
+                f"Malformed chunk manifest row {chunk_manifest_path}:{line_number}"
+            ) from exc
+        if pair_id in split_pair_ids:
+            if len(source_sha256) != 64 or any(
+                character not in "0123456789abcdef" for character in source_sha256
+            ):
+                raise ValueError(
+                    f"Invalid source_audio_sha256 in {chunk_manifest_path}:{line_number}"
+                )
+            identity = (pair_id, recording_id)
+            previous = source_hash_by_recording.setdefault(identity, source_sha256)
+            if previous != source_sha256:
+                raise ValueError(
+                    f"Conflicting source checksums for {identity!r} in {chunk_manifest_path}"
+                )
+            resolved.add(identity)
+
+    if len(resolved) != expected_streams:
+        raise ValueError(
+            "Split stream discovery disagrees with integrity report: "
+            f"resolved {len(resolved)}, expected {expected_streams}"
+        )
+    resolved_pair_ids = {pair_id for pair_id, _ in resolved}
+    if resolved_pair_ids != split_pair_ids:
+        missing = sorted(split_pair_ids - resolved_pair_ids)
+        extra = sorted(resolved_pair_ids - split_pair_ids)
+        raise ValueError(f"Split pair mismatch; missing={missing}, extra={extra}")
+    return split_pair_ids, resolved, set(source_hash_by_recording.values())
+
+
+def _used_source_hashes(capture_manifest_path: Path, split_pair_ids: set[str]) -> set[str]:
+    """Resolve source-stream checksums already exposed to any dataset split."""
+    manifest = _read_json(capture_manifest_path)
+    checksums: set[str] = set()
+    try:
+        for session in manifest["sessions"]:
+            if str(session["pair_id"]) not in split_pair_ids:
+                continue
+            checksums.update(str(stream["sha256"]) for stream in session["streams"])
+    except (KeyError, TypeError) as exc:
+        raise ValueError(f"Malformed capture manifest {capture_manifest_path}") from exc
+    return checksums
+
+
+def _resolve_label_path(recording_id: str, label_dirs: tuple[Path, ...]) -> Path:
+    """Resolve exactly one annotation JSON for a held-out recording."""
+    candidates = [directory / f"{recording_id}.json" for directory in label_dirs]
+    matches = [path for path in candidates if path.is_file()]
+    if len(matches) != 1:
+        raise ValueError(f"Expected exactly one label JSON for {recording_id!r}; found {matches}")
+    return matches[0]
+
+
+def _resolve_source_file(source_root: Path, value: object, *, field: str) -> Path:
+    """Resolve a manifest source file without allowing reads outside its capture root."""
+    if not isinstance(value, str):
+        raise ValueError(f"Holdout manifest {field} must be an absolute path string")
+    raw_path = Path(value)
+    if not raw_path.is_absolute():
+        raise ValueError(f"Holdout manifest {field} must be absolute: {value!r}")
+    resolved = raw_path.resolve()
+    if not resolved.is_relative_to(source_root):
+        raise ValueError(f"Holdout manifest {field} escapes source_root: {value!r}")
+    if not resolved.is_file() or raw_path.is_symlink():
+        raise ValueError(f"Holdout manifest {field} is not a regular source file: {value!r}")
+    return resolved
+
+
+def _parse_region(
+    label: dict[str, Any],
+    label_path: Path,
+    duration_sec: float,
+    stream_start_offset_seconds_relative_to_mic1: float = 0.0,
+) -> FirstCrackRegion | None:
+    """Parse the optional single first-crack region and its provenance."""
+    annotations = label.get("annotations")
+    if not isinstance(annotations, list):
+        raise ValueError(f"annotations must be a list in {label_path}")
+    if any(
+        not isinstance(item, dict) or item.get("label") != "first_crack" for item in annotations
+    ):
+        raise ValueError(f"Unsupported annotation region in {label_path}")
+    regions = annotations
+    if len(regions) > 1:
+        raise ValueError(f"Expected at most one first-crack region in {label_path}")
+    if not regions:
+        return None
+    region = regions[0]
+    try:
+        source_start_sec = float(region["start_time"])
+        source_end_sec = float(region["end_time"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"Malformed first-crack region in {label_path}") from exc
+    if not math.isfinite(source_start_sec) or not math.isfinite(source_end_sec):
+        raise ValueError(f"Invalid first-crack region in {label_path}")
+    start_sec = source_start_sec - stream_start_offset_seconds_relative_to_mic1
+    end_sec = source_end_sec - stream_start_offset_seconds_relative_to_mic1
+    if start_sec < 0:
+        raise ValueError(f"Invalid first-crack region in {label_path}")
+    if end_sec <= start_sec:
+        raise ValueError(f"first-crack end must be after start in {label_path}")
+    if end_sec > duration_sec:
+        raise ValueError(f"first-crack region is outside held-out stream in {label_path}")
+
+    provenance = label.get("provenance")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    uncertainty = float(provenance.get("alignment_uncertainty_seconds", 0.0))
+    source = str(provenance.get("annotation_source", "legacy_human"))
+    if not math.isfinite(uncertainty) or uncertainty < 0:
+        raise ValueError(f"Invalid alignment uncertainty in {label_path}")
+    return FirstCrackRegion(
+        start_sec=start_sec,
+        end_sec=end_sec,
+        alignment_uncertainty_sec=uncertainty,
+        annotation_source=source,
+    )
+
+
+def _validate_label_identity(
+    *,
+    label: dict[str, Any],
+    label_path: Path,
+    pair_id: str,
+    session: dict[str, Any],
+    stream: dict[str, Any],
+    primary_stream: dict[str, Any],
+) -> float:
+    """Prove a holdout annotation belongs to the expected paired stream."""
+    mic_num = int(stream["mic_num"])
+    audio_file = label.get("audio_file")
+    expected_basename = Path(str(stream["staged_relative_path"])).name
+    if (
+        not isinstance(audio_file, str)
+        or not audio_file
+        or "\\" in audio_file
+        or Path(audio_file).is_absolute()
+        or ".." in Path(audio_file).parts
+        or Path(audio_file).name != expected_basename
+        or label.get("pair_id") != pair_id
+        or label.get("mic_num") != mic_num
+        or label.get("origin") != session["origin"]
+        or label.get("roast_num") != session["roast_num"]
+        or label.get("original_filename") != stream["original_filename"]
+    ):
+        raise ValueError(f"Label stream identity does not match holdout manifest: {label_path}")
+
+    provenance = label.get("provenance")
+    if not isinstance(provenance, dict) or provenance.get("pair_id") != pair_id:
+        raise ValueError(f"Label provenance does not match holdout pair: {label_path}")
+    if mic_num == 1:
+        if provenance.get("annotation_source") != "human_label_studio":
+            raise ValueError(
+                f"Holdout mic1 label is not human Label Studio ground truth: {label_path}"
+            )
+        return 0.0
+
+    uncertainty = provenance.get("alignment_uncertainty_seconds")
+    method = provenance.get("derivation_method")
+    exact_offsets = provenance.get("exact_stream_start_offsets_available")
+    start_offset = provenance.get("stream_start_offset_seconds_relative_to_mic1")
+    if (
+        provenance.get("annotation_source") != "derived_from_paired_mic"
+        or provenance.get("derived_from") != primary_stream["staged_relative_path"]
+        or provenance.get("boundary_time_axis") != "mic1_session_axis"
+        or method not in {"verified_audio_alignment", "recorded_stream_timestamp_alignment"}
+        or provenance.get("alignment") != "independent_clocks_not_sample_locked"
+        or (method == "verified_audio_alignment" and exact_offsets is not False)
+        or (method == "recorded_stream_timestamp_alignment" and exact_offsets is not True)
+        or not isinstance(uncertainty, (int, float))
+        or isinstance(uncertainty, bool)
+        or not math.isfinite(float(uncertainty))
+        or uncertainty < 0
+        or not isinstance(start_offset, (int, float))
+        or isinstance(start_offset, bool)
+        or not math.isfinite(float(start_offset))
+    ):
+        raise ValueError(
+            f"Holdout mic2 label lacks valid derived-mic uncertainty provenance: {label_path}"
+        )
+    return float(start_offset)
+
+
+def _validate_recording_sidecar(
+    sidecar: dict[str, Any],
+    *,
+    sidecar_path: Path,
+    pair_id: str,
+    streams: list[dict[str, Any]],
+) -> None:
+    """Bind authoritative roast timing metadata to the selected stream pair."""
+    if sidecar.get("schema_version") != 2 or sidecar.get("session_id") != pair_id:
+        raise ValueError(
+            f"Recording sidecar identity does not match pair {pair_id!r}: {sidecar_path}"
+        )
+    sidecar_streams = sidecar.get("streams")
+    if not isinstance(sidecar_streams, list) or len(sidecar_streams) != 2:
+        raise ValueError(f"Recording sidecar must identify both streams: {sidecar_path}")
+    by_filename: dict[str, dict[str, Any]] = {}
+    for item in sidecar_streams:
+        if not isinstance(item, dict) or not isinstance(item.get("wav_filename"), str):
+            raise ValueError(f"Recording sidecar has malformed stream identity: {sidecar_path}")
+        filename = item["wav_filename"]
+        if filename in by_filename:
+            raise ValueError(f"Recording sidecar has duplicate stream identity: {sidecar_path}")
+        by_filename[filename] = item
+    expected_filenames = {str(stream["original_filename"]) for stream in streams}
+    if set(by_filename) != expected_filenames:
+        raise ValueError(f"Recording sidecar streams do not match pair {pair_id!r}: {sidecar_path}")
+    for stream in streams:
+        item = by_filename[str(stream["original_filename"])]
+        raw_duration = item.get("duration_seconds")
+        sample_rate = item.get("sample_rate")
+        if (
+            not isinstance(raw_duration, (int, float))
+            or isinstance(raw_duration, bool)
+            or not isinstance(sample_rate, int)
+            or isinstance(sample_rate, bool)
+        ):
+            raise ValueError(
+                f"Recording sidecar has malformed audio metadata for pair {pair_id!r}: "
+                f"{sidecar_path}"
+            )
+        duration = float(raw_duration)
+        expected_duration = float(stream["duration_seconds"])
+        expected_sample_rate = int(stream["sample_rate"])
+        if (
+            not math.isfinite(duration)
+            or sample_rate != expected_sample_rate
+            or not math.isclose(
+                duration,
+                expected_duration,
+                rel_tol=0.0,
+                abs_tol=1.0 / expected_sample_rate,
+            )
+        ):
+            raise ValueError(
+                f"Recording sidecar audio metadata does not match pair {pair_id!r}: {sidecar_path}"
+            )
+
+
+def discover_heldout_recordings(
+    *,
+    split_integrity_path: Path,
+    chunk_manifest_path: Path,
+    dataset_capture_manifest_path: Path,
+    holdout_capture_manifest_path: Path,
+    label_dirs: tuple[Path, ...],
+    pair_ids: set[str] | None,
+    window_seconds: float,
+    minimum_pair_count: int = 6,
+    minimum_origin_count: int = 3,
+) -> list[HeldOutRecording]:
+    """Discover a fresh full-roast holdout and fail closed on prior exposure."""
+    split_pair_ids, _, split_source_hashes = _split_recording_ids(
+        split_integrity_path, chunk_manifest_path
+    )
+    used_hashes = split_source_hashes | _used_source_hashes(
+        dataset_capture_manifest_path, split_pair_ids
+    )
+    holdout_manifest = _read_json(holdout_capture_manifest_path)
+    source_root_value = holdout_manifest.get("source_root")
+    if not isinstance(source_root_value, str) or not Path(source_root_value).is_absolute():
+        raise ValueError("Holdout manifest source_root must be an absolute path string")
+    source_root = Path(source_root_value).resolve()
+    if not source_root.is_dir():
+        raise ValueError(f"Holdout manifest source_root is not a directory: {source_root}")
+    recordings: list[HeldOutRecording] = []
+    discovered_pairs: set[str] = set()
+    discovered_origins: set[str] = set()
+    cohort_hashes: set[str] = set()
+    try:
+        sessions = holdout_manifest["sessions"]
+        for session in sessions:
+            pair_id = str(session["pair_id"])
+            if pair_ids is not None and pair_id not in pair_ids:
+                continue
+            if pair_ids is None and pair_id in split_pair_ids:
+                continue
+            if pair_id in discovered_pairs:
+                raise ValueError(f"Duplicate holdout pair ID {pair_id!r}")
+            discovered_pairs.add(pair_id)
+            if pair_id in split_pair_ids:
+                raise ValueError(f"Holdout pair {pair_id!r} already appears in a dataset split")
+            origin = session.get("origin")
+            if not isinstance(origin, str) or not origin or origin != origin.strip():
+                raise ValueError(f"Holdout pair {pair_id!r} has no valid bean origin")
+            discovered_origins.add(origin.casefold())
+
+            streams = session["streams"]
+            if (
+                not isinstance(streams, list)
+                or len(streams) != 2
+                or not all(isinstance(stream, dict) for stream in streams)
+                or {int(stream["mic_num"]) for stream in streams} != {1, 2}
+            ):
+                raise ValueError(f"Holdout pair {pair_id!r} must contain exactly mic1 and mic2")
+            for stream in streams:
+                duration_sec = float(stream["duration_seconds"])
+                if not math.isfinite(duration_sec):
+                    raise ValueError(
+                        f"Invalid duration for holdout pair {pair_id!r} mic{stream['mic_num']}"
+                    )
+                if duration_sec < window_seconds:
+                    raise ValueError(
+                        f"Holdout pair {pair_id!r} mic{stream['mic_num']} is only "
+                        f"{duration_sec:.2f}s; at least {window_seconds:.2f}s is required"
+                    )
+
+            sidecar_path = _resolve_source_file(
+                source_root,
+                session["recording_sidecar_source_path"],
+                field="recording_sidecar_source_path",
+            )
+            sidecar_sha256 = _sha256(sidecar_path)
+            sidecar = _read_json(sidecar_path)
+            _validate_recording_sidecar(
+                sidecar,
+                sidecar_path=sidecar_path,
+                pair_id=pair_id,
+                streams=streams,
+            )
+            if _sha256(sidecar_path) != sidecar_sha256:
+                raise ValueError(f"Recording sidecar changed during discovery: {sidecar_path}")
+            milestones = sidecar.get("milestones")
+            if (
+                not isinstance(milestones, dict)
+                or milestones.get("beans_added") is None
+                or milestones.get("drop") is None
+            ):
+                raise ValueError(
+                    f"Holdout pair {pair_id!r} lacks an authoritative recording-relative "
+                    "beans_added or drop milestone"
+                )
+            t0_offset_sec = float(milestones["beans_added"])
+            drop_offset_sec = float(milestones["drop"])
+            if not math.isfinite(t0_offset_sec) or t0_offset_sec < 0:
+                raise ValueError(f"Invalid beans_added milestone for holdout pair {pair_id!r}")
+            if not math.isfinite(drop_offset_sec) or drop_offset_sec <= t0_offset_sec:
+                raise ValueError(f"Invalid drop milestone for holdout pair {pair_id!r}")
+
+            primary_stream = next(stream for stream in streams if int(stream["mic_num"]) == 1)
+            for stream in streams:
+                duration_sec = float(stream["duration_seconds"])
+                source_sha256 = str(stream["sha256"])
+                if source_sha256 in used_hashes:
+                    raise ValueError(
+                        f"Holdout pair {pair_id!r} reuses a source checksum already exposed "
+                        "to a dataset split"
+                    )
+                if source_sha256 in cohort_hashes:
+                    raise ValueError(
+                        f"Duplicate source checksum within holdout cohort: {source_sha256}"
+                    )
+                audio_path = _resolve_source_file(
+                    source_root, stream["source_path"], field="streams[].source_path"
+                )
+                if _sha256(audio_path) != source_sha256:
+                    raise ValueError(f"Held-out source checksum changed: {audio_path}")
+                cohort_hashes.add(source_sha256)
+                recording_id = Path(str(stream["staged_relative_path"])).stem
+                label_path = _resolve_label_path(recording_id, label_dirs)
+                label_sha256 = _sha256(label_path)
+                label = _read_json(label_path)
+                stream_start_offset = _validate_label_identity(
+                    label=label,
+                    label_path=label_path,
+                    pair_id=pair_id,
+                    session=session,
+                    stream=stream,
+                    primary_stream=primary_stream,
+                )
+                stream_t0_offset = t0_offset_sec - stream_start_offset
+                stream_drop_offset = drop_offset_sec - stream_start_offset
+                if stream_t0_offset < 0 or stream_drop_offset > duration_sec:
+                    raise ValueError(
+                        f"Holdout pair {pair_id!r} milestones adjusted for mic"
+                        f"{stream['mic_num']} start offset fall outside its stream"
+                    )
+                region = _parse_region(
+                    label,
+                    label_path,
+                    duration_sec,
+                    stream_start_offset_seconds_relative_to_mic1=stream_start_offset,
+                )
+                if _sha256(label_path) != label_sha256:
+                    raise ValueError(f"Holdout label changed during discovery: {label_path}")
+                recordings.append(
+                    HeldOutRecording(
+                        pair_id=pair_id,
+                        origin=origin,
+                        recording_id=recording_id,
+                        audio_path=audio_path,
+                        label_path=label_path,
+                        label_sha256=label_sha256,
+                        mic_num=int(stream["mic_num"]),
+                        mic_label=str(stream["label"]),
+                        source_sha256=source_sha256,
+                        recording_sidecar_path=sidecar_path,
+                        recording_sidecar_sha256=sidecar_sha256,
+                        stream_start_offset_seconds_relative_to_mic1=stream_start_offset,
+                        t0_offset_sec=stream_t0_offset,
+                        drop_offset_sec=stream_drop_offset,
+                        region=region,
+                    )
+                )
+    except (KeyError, TypeError, ValueError) as exc:
+        if isinstance(exc, ValueError):
+            raise
+        raise ValueError(f"Malformed holdout manifest {holdout_capture_manifest_path}") from exc
+
+    if pair_ids is not None and discovered_pairs != pair_ids:
+        missing = sorted(pair_ids - discovered_pairs)
+        raise ValueError(f"Requested holdout pair IDs were not found: {missing}")
+    if not recordings:
+        raise ValueError(
+            "No fresh holdout recordings were found; provide new pair IDs absent from all splits"
+        )
+    if len(discovered_pairs) < minimum_pair_count:
+        raise ValueError(
+            "Fresh holdout cohort is not decisive: "
+            f"found {len(discovered_pairs)} physical sessions, require at least "
+            f"{minimum_pair_count}"
+        )
+    if len(discovered_origins) < minimum_origin_count:
+        raise ValueError(
+            "Fresh holdout cohort is too narrow: "
+            f"found {len(discovered_origins)} bean origins, require at least "
+            f"{minimum_origin_count}"
+        )
+    return sorted(recordings, key=lambda item: (item.pair_id, item.mic_num or 0))
+
+
+def classify_outcome(
+    *,
+    region: FirstCrackRegion | None,
+    notification_sec: float | None,
+) -> str:
+    """Classify operational notification timeliness without hiding false alerts."""
+    if region is None:
+        return "true_negative" if notification_sec is None else "false_positive"
+    if notification_sec is None:
+        return "missed"
+    uncertainty = region.alignment_uncertainty_sec
+    if notification_sec < region.start_sec - uncertainty:
+        return "premature_false_alert"
+    if notification_sec >= region.end_sec + uncertainty:
+        return "late_outside_region"
+    return "detected"
+
+
+def _snapshot_recording_audio(recording: HeldOutRecording, temp_dir: Path) -> Path:
+    """Copy one verified source WAV into the evaluator-owned immutable workspace."""
+    if _sha256(recording.audio_path) != recording.source_sha256:
+        raise RuntimeError(f"Held-out source changed before snapshot: {recording.audio_path}")
+    snapshot_dir = temp_dir / "source-snapshots"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    destination = snapshot_dir / f"{recording.recording_id}.wav"
+    if destination.exists():
+        raise FileExistsError(f"Duplicate held-out snapshot destination: {destination}")
+    shutil.copyfile(recording.audio_path, destination)
+    if (
+        _sha256(destination) != recording.source_sha256
+        or _sha256(recording.audio_path) != recording.source_sha256
+    ):
+        raise RuntimeError(f"Held-out source changed while snapshotting: {recording.audio_path}")
+    return destination
+
+
+def _prepare_audio(
+    recording: HeldOutRecording, temp_dir: Path, source_path: Path
+) -> tuple[Path, bool]:
+    """Return a 16 kHz PCM path, resampling only a temporary copy when required."""
+    info = sf.info(str(source_path))
+    if info.samplerate == SAMPLE_RATE and info.channels == 1 and info.subtype.startswith("PCM"):
+        return source_path, False
+    audio, _ = librosa.load(str(source_path), sr=SAMPLE_RATE, mono=True)
+    destination = temp_dir / f"{recording.recording_id}__16khz.wav"
+    sf.write(str(destination), audio, SAMPLE_RATE, subtype="PCM_16")
+    return destination, True
+
+
+def _load_mcp(mcp_src: Path) -> dict[str, Any]:
+    """Import the explicitly selected coffee-roaster-mcp checkout."""
+    resolved = mcp_src.resolve()
+    if not (resolved / "coffee_roaster_mcp" / "detector.py").is_file():
+        raise ValueError(f"Not a coffee-roaster-mcp src directory: {resolved}")
+    preloaded = sorted(
+        name
+        for name in sys.modules
+        if name == "coffee_roaster_mcp" or name.startswith("coffee_roaster_mcp.")
+    )
+    if preloaded:
+        raise RuntimeError(
+            "coffee_roaster_mcp was imported before source selection; "
+            f"refusing ambiguous provenance: {preloaded}"
+        )
+    sys.path.insert(0, str(resolved))
+    modules = {
+        name: importlib.import_module(f"coffee_roaster_mcp.{name}")
+        for name in ("artifacts", "audio", "config", "detector")
+    }
+    for name, module in modules.items():
+        module_file = getattr(module, "__file__", None)
+        if module_file is None or not Path(module_file).resolve().is_relative_to(resolved):
+            raise RuntimeError(
+                f"Imported coffee_roaster_mcp.{name} outside selected source tree: {module_file}"
+            )
+
+    return {
+        "AudioConfig": modules["config"].AudioConfig,
+        "FirstCrackConfig": modules["config"].FirstCrackConfig,
+        "ResolvedArtifact": modules["artifacts"].ResolvedArtifact,
+        "ResolvedDetectorArtifacts": modules["artifacts"].ResolvedDetectorArtifacts,
+        "build_audio_capture_pipeline": modules["audio"].build_audio_capture_pipeline,
+        "build_first_crack_detector_adapter": modules[
+            "detector"
+        ].build_first_crack_detector_adapter,
+        "build_released_onnx_first_crack_detector_backend": (
+            modules["detector"].build_released_onnx_first_crack_detector_backend
+        ),
+    }
+
+
+def _resolved_artifacts(
+    mcp: dict[str, Any], *, onnx_dir: Path, repo_id: str, revision: str | None
+) -> ResolvedDetectorArtifactsLike:
+    """Build MCP artifact metadata for an unpublished local candidate."""
+    onnx_models = sorted(onnx_dir.glob("*.onnx"))
+    if len(onnx_models) != 1:
+        raise ValueError(f"Expected exactly one ONNX model in {onnx_dir}; found {onnx_models}")
+    preprocessor = onnx_dir / "preprocessor_config.json"
+    if not preprocessor.is_file():
+        raise ValueError(f"Missing {preprocessor}")
+    artifact_type = mcp["ResolvedArtifact"]
+    return cast(
+        ResolvedDetectorArtifactsLike,
+        mcp["ResolvedDetectorArtifacts"](
+            onnx_model=artifact_type(
+                repo_id=repo_id,
+                revision=revision,
+                filename="onnx/int8/model_quantized.onnx",
+                local_path=onnx_models[0].resolve(),
+            ),
+            feature_extractor_config=artifact_type(
+                repo_id=repo_id,
+                revision=revision,
+                filename="onnx/int8/preprocessor_config.json",
+                local_path=preprocessor.resolve(),
+            ),
+        ),
+    )
+
+
+def _evaluate_recording(
+    *,
+    mcp: dict[str, Any],
+    config: object,
+    artifacts: ResolvedDetectorArtifactsLike,
+    backend: object,
+    recording: HeldOutRecording,
+    replay_path: Path,
+    resampled: bool,
+    window_seconds: float,
+    overlap: float,
+) -> dict[str, Any]:
+    """Replay one full recording through the real MCP window and adapter path."""
+    audio_config = mcp["AudioConfig"](
+        source="wav",
+        input_device=recording.mic_label,
+        sample_rate=SAMPLE_RATE,
+        wav_path=replay_path,
+        replay_mode="detector_paced",
+        window_seconds=window_seconds,
+        overlap=overlap,
+        hop_seconds=None,
+    )
+    pipeline = mcp["build_audio_capture_pipeline"](audio_config)
+    adapter = mcp["build_first_crack_detector_adapter"](config, artifacts, backend)
+    pipeline.start()
+
+    first_window_started: float | None = None
+    first_event: Any | None = None
+    event_count = 0
+    processed_windows = 0
+    positive_windows = 0
+    max_confidence = 0.0
+    inference_latencies_ms: list[float] = []
+    confirming_inference_latency_ms: float | None = None
+    started_at = time.monotonic()
+    try:
+        while True:
+            windows = pipeline.drain_windows(max_windows=1)
+            if not windows:
+                break
+            window = windows[0]
+            if first_window_started is None:
+                first_window_started = float(window.started_at_monotonic_seconds)
+            inference_started_at = time.perf_counter()
+            observation = adapter.process_window_observed(
+                window,
+                earliest_eligible_monotonic_seconds=first_window_started,
+            )
+            inference_latency_ms = (time.perf_counter() - inference_started_at) * 1000.0
+            inference_latencies_ms.append(inference_latency_ms)
+            processed_windows += 1
+            confidence = observation.confidence
+            if confidence is not None:
+                max_confidence = max(max_confidence, float(confidence))
+            if observation.fc_status in {"candidate", "confirmed"}:
+                positive_windows += 1
+            if observation.event is not None:
+                event_count += 1
+                if first_event is None:
+                    first_event = observation.event
+                    confirming_inference_latency_ms = inference_latency_ms
+    finally:
+        pipeline.stop()
+
+    detected_sec: float | None = None
+    confirmed_sec: float | None = None
+    event_confidence: float | None = None
+    confirming_sequence: int | None = None
+    notification_sec: float | None = None
+    if first_event is not None:
+        if first_window_started is None:
+            raise RuntimeError("MCP emitted an event before the first replay window")
+        detected_sec = round(
+            float(first_event.detected_at_monotonic_seconds) - first_window_started, 6
+        )
+        confirmed_sec = round(
+            float(first_event.confirmed_at_monotonic_seconds) - first_window_started, 6
+        )
+        event_confidence = None if first_event.confidence is None else float(first_event.confidence)
+        confirming_sequence = int(first_event.confirmed_by_window_sequence_number)
+        if confirming_inference_latency_ms is None:
+            raise RuntimeError("MCP confirmation is missing its measured inference latency")
+        notification_sec = confirmed_sec + confirming_inference_latency_ms / 1000.0
+
+    region = recording.region
+    label_start_after_t0 = None if region is None else region.start_sec - recording.t0_offset_sec
+    event_after_t0 = None if detected_sec is None else detected_sec - recording.t0_offset_sec
+    confirmed_after_t0 = None if confirmed_sec is None else confirmed_sec - recording.t0_offset_sec
+    notification_after_t0 = (
+        None if notification_sec is None else notification_sec - recording.t0_offset_sec
+    )
+    timing_error = (
+        None
+        if label_start_after_t0 is None or event_after_t0 is None
+        else event_after_t0 - label_start_after_t0
+    )
+    confirmation_delay = (
+        None
+        if label_start_after_t0 is None or notification_after_t0 is None
+        else notification_after_t0 - label_start_after_t0
+    )
+    return {
+        "pair_id": recording.pair_id,
+        "origin": recording.origin,
+        "recording_id": recording.recording_id,
+        "mic_num": recording.mic_num,
+        "mic_label": recording.mic_label,
+        "audio_path": str(recording.audio_path),
+        "audio_sha256": recording.source_sha256,
+        "label_path": str(recording.label_path),
+        "ground_truth": None if region is None else asdict(region),
+        "t0_alignment": {
+            "source": "roast.recording.json:milestones.beans_added",
+            "stream_start_offset_seconds_relative_to_mic1": (
+                recording.stream_start_offset_seconds_relative_to_mic1
+            ),
+            "wav_offset_sec": recording.t0_offset_sec,
+            "drop_wav_offset_sec": recording.drop_offset_sec,
+            "label_start_sec_after_t0": label_start_after_t0,
+        },
+        "resampled_to_16khz_temporary_copy": resampled,
+        "detected": first_event is not None,
+        "event_count": event_count,
+        "detected_sec": detected_sec,
+        "confirmed_sec": confirmed_sec,
+        "notification_sec": notification_sec,
+        "event_sec_after_t0": event_after_t0,
+        "confirmed_sec_after_t0": confirmed_after_t0,
+        "notification_sec_after_t0": notification_after_t0,
+        "event_timing_error_from_label_start_sec": timing_error,
+        "agent_confirmation_delay_from_label_start_sec": confirmation_delay,
+        "event_confidence": event_confidence,
+        "max_processed_confidence": max_confidence,
+        "confirming_window_sequence": confirming_sequence,
+        "processed_window_count": processed_windows,
+        "positive_window_count": positive_windows,
+        "inference_latency_ms": _distribution(inference_latencies_ms),
+        "confirming_inference_latency_ms": confirming_inference_latency_ms,
+        "outcome": classify_outcome(
+            region=region,
+            notification_sec=notification_sec,
+        ),
+        "wall_seconds": time.monotonic() - started_at,
+    }
+
+
+def _select_deployed_stream(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Select mic1 as the protocol's frozen primary live-path stream."""
+    if len(results) == 1:
+        return results[0]
+    mic1 = [result for result in results if result["mic_num"] == 1]
+    if len(mic1) != 1:
+        raise ValueError(
+            f"Could not select one mic1 primary stream for pair {results[0]['pair_id']}"
+        )
+    return mic1[0]
+
+
+def _aggregate(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build stream-level and deployed physical-session summaries."""
+    by_pair: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for result in results:
+        by_pair[str(result["pair_id"])].append(result)
+    deployed = [_select_deployed_stream(pair_results) for pair_results in by_pair.values()]
+
+    def summarize(items: list[dict[str, Any]]) -> dict[str, Any]:
+        positive = [item for item in items if item["ground_truth"] is not None]
+        negative = [item for item in items if item["ground_truth"] is None]
+        detected = [item for item in positive if item["outcome"] == "detected"]
+        timing_errors = [
+            float(item["event_timing_error_from_label_start_sec"]) for item in detected
+        ]
+        confirmation_delays = [
+            float(item["agent_confirmation_delay_from_label_start_sec"]) for item in detected
+        ]
+        return {
+            "count": len(items),
+            "positive_count": len(positive),
+            "negative_count": len(negative),
+            "detected_positive_count": len(detected),
+            "detection_rate": len(detected) / len(positive) if positive else None,
+            "false_positive_count": sum(item["outcome"] == "false_positive" for item in negative),
+            "missed_count": sum(item["outcome"] == "missed" for item in positive),
+            "premature_false_alert_count": sum(
+                item["outcome"] == "premature_false_alert" for item in positive
+            ),
+            "late_outside_region_count": sum(
+                item["outcome"] == "late_outside_region" for item in positive
+            ),
+            "one_event_max_passed": all(int(item["event_count"]) <= 1 for item in items),
+            "timing_error_sec": _distribution(timing_errors),
+            "agent_confirmation_delay_sec": _distribution(confirmation_delays),
+        }
+
+    pair_comparisons = []
+    for pair_id, pair_results in sorted(by_pair.items()):
+        if len(pair_results) != 2:
+            continue
+        detected_times = [item["event_sec_after_t0"] for item in pair_results]
+        pair_comparisons.append(
+            {
+                "pair_id": pair_id,
+                "recording_ids": [item["recording_id"] for item in pair_results],
+                "both_detected": all(value is not None for value in detected_times),
+                "event_time_delta_sec": (
+                    None
+                    if any(value is None for value in detected_times)
+                    else abs(float(detected_times[0]) - float(detected_times[1]))
+                ),
+            }
+        )
+    return {
+        "stream_level": summarize(results),
+        "deployed_physical_session_level": summarize(deployed),
+        "deployed_recording_ids": sorted(str(item["recording_id"]) for item in deployed),
+        "paired_stream_comparisons": pair_comparisons,
+    }
+
+
+def _distribution(values: list[float]) -> dict[str, float] | None:
+    """Return a compact deterministic distribution summary."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    median = ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2
+    return {"min": min(values), "median": median, "max": max(values)}
+
+
+def _write_markdown(output_path: Path, report: dict[str, Any]) -> None:
+    """Write a human-readable companion table next to the JSON report."""
+    profile = report["profile"]
+    aggregate = report["aggregate"]
+    lines = [
+        "# MCP held-out full-recording replay",
+        "",
+        "## Profile",
+        "",
+        f"- Model: `{report['model']['onnx_path']}`",
+        f"- Model SHA-256: `{report['model']['onnx_sha256']}`",
+        f"- MCP source: `{report['mcp']['source_path']}` at `{report['mcp']['git_head']}`",
+        f"- Window/hop: {profile['window_seconds']:.1f}s / {profile['hop_seconds']:.1f}s",
+        f"- Threshold: {profile['confidence_threshold']}",
+        f"- Confirmation: {profile['min_positive_windows']} positives within "
+        f"{profile['confirmation_window_seconds']:.1f}s",
+        "",
+        "## Aggregate",
+        "",
+        "```json",
+        json.dumps(aggregate, indent=2, sort_keys=True),
+        "```",
+        "",
+        "## Recordings",
+        "",
+        "| Pair | Recording | Mic | GT after T0 | Event after T0 | "
+        "Notified after T0 | Error | Outcome |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for item in report["recordings"]:
+        t0_alignment = item["t0_alignment"]
+        gt_start = (
+            "—"
+            if t0_alignment["label_start_sec_after_t0"] is None
+            else f"{t0_alignment['label_start_sec_after_t0']:.1f}"
+        )
+        detected = (
+            "—" if item["event_sec_after_t0"] is None else f"{item['event_sec_after_t0']:.1f}"
+        )
+        confirmed = (
+            "—"
+            if item["notification_sec_after_t0"] is None
+            else f"{item['notification_sec_after_t0']:.1f}"
+        )
+        error = (
+            "—"
+            if item["event_timing_error_from_label_start_sec"] is None
+            else f"{item['event_timing_error_from_label_start_sec']:+.1f}"
+        )
+        lines.append(
+            f"| `{item['pair_id']}` | `{item['recording_id']}` | "
+            f"{item['mic_num'] or '—'} | {gt_start} | {detected} | {confirmed} | "
+            f"{error} | {item['outcome']} |"
+        )
+    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _freeze_protocol(path: Path, protocol: dict[str, Any]) -> None:
+    """Persist or verify the immutable pre-inference protocol lock."""
+    serialized = json.dumps(protocol, indent=2, sort_keys=True) + "\n"
+    if path.exists():
+        if path.read_text(encoding="utf-8") != serialized:
+            raise ValueError(
+                f"Frozen protocol {path} differs from this invocation; use a new cohort/output"
+            )
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(serialized, encoding="utf-8")
+
+
+def evaluate(args: argparse.Namespace) -> dict[str, Any]:
+    """Run the complete held-out MCP replay and return its auditable report."""
+    base_evidence_paths = {
+        "split_integrity": args.split_integrity,
+        "chunk_manifest": args.chunk_manifest,
+        "dataset_capture_manifest": args.dataset_capture_manifest,
+        "holdout_capture_manifest": args.holdout_capture_manifest,
+        "training_provenance": args.training_provenance,
+    }
+    base_evidence_snapshot = _snapshot_inputs(base_evidence_paths)
+    mcp_root = args.mcp_src.resolve().parent
+    git_head = _git_head(mcp_root)
+    evaluator_path = Path(__file__).resolve()
+    evaluator_sha256 = _sha256(evaluator_path)
+    mcp = _load_mcp(args.mcp_src)
+    recordings = discover_heldout_recordings(
+        split_integrity_path=args.split_integrity,
+        chunk_manifest_path=args.chunk_manifest,
+        dataset_capture_manifest_path=args.dataset_capture_manifest,
+        holdout_capture_manifest_path=args.holdout_capture_manifest,
+        label_dirs=tuple(args.labels_dir),
+        pair_ids=None if args.pair_id is None else set(args.pair_id),
+        window_seconds=args.window_seconds,
+    )
+    _verify_input_snapshot(base_evidence_paths, base_evidence_snapshot)
+    sidecar_paths = {
+        f"recording_sidecar:{recording.pair_id}": recording.recording_sidecar_path
+        for recording in recordings
+    }
+    label_paths = {
+        f"label:{recording.recording_id}": recording.label_path for recording in recordings
+    }
+    evidence_paths = {**base_evidence_paths, **sidecar_paths, **label_paths}
+    evidence_snapshot = _snapshot_inputs(evidence_paths)
+    _verify_recording_evidence_snapshot(recordings, evidence_snapshot)
+    artifacts = _resolved_artifacts(
+        mcp,
+        onnx_dir=args.onnx_dir,
+        repo_id=args.repo_id,
+        revision=args.revision,
+    )
+    model_path = Path(artifacts.onnx_model.local_path)
+    preprocessor_path = Path(artifacts.feature_extractor_config.local_path)
+    artifact_paths = {
+        "onnx_model": model_path,
+        "preprocessor_config": preprocessor_path,
+    }
+    artifact_snapshot = _snapshot_inputs(artifact_paths)
+    training_provenance = validate_onnx_training_provenance(
+        provenance_path=args.training_provenance,
+        onnx_sha256=artifact_snapshot["onnx_model"]["sha256"],
+        preprocessor_sha256=artifact_snapshot["preprocessor_config"]["sha256"],
+        dataset_evidence_sha256={
+            name: base_evidence_snapshot[name]["sha256"]
+            for name in ("split_integrity", "chunk_manifest", "dataset_capture_manifest")
+        },
+    )
+    hop_seconds = args.window_seconds * (1.0 - args.overlap)
+    protocol = {
+        "schema_version": 1,
+        "status": "frozen_before_inference",
+        "evaluator": {"path": str(evaluator_path), "sha256": evaluator_sha256},
+        "mcp": {"source_path": str(mcp_root), "git_head": git_head},
+        "model": {
+            "repo_id": args.repo_id,
+            "revision": args.revision,
+            "precision": "int8",
+            "onnx_sha256": artifact_snapshot["onnx_model"]["sha256"],
+            "preprocessor_sha256": artifact_snapshot["preprocessor_config"]["sha256"],
+            "training_provenance_sha256": base_evidence_snapshot["training_provenance"]["sha256"],
+            "training_experiment": training_provenance.get("experiment_name"),
+        },
+        "profile": {
+            "sample_rate": SAMPLE_RATE,
+            "window_seconds": args.window_seconds,
+            "overlap": args.overlap,
+            "hop_seconds": hop_seconds,
+            "confidence_threshold": args.threshold,
+            "min_positive_windows": args.min_positive_windows,
+            "confirmation_window_seconds": args.confirmation_window,
+            "onnx_threads": args.threads,
+            "primary_stream": "mic1",
+            "paired_robustness_stream": "mic2",
+        },
+        "dataset_exposure_evidence": evidence_snapshot,
+        "holdout": [
+            {
+                "pair_id": recording.pair_id,
+                "origin": recording.origin,
+                "recording_id": recording.recording_id,
+                "mic_num": recording.mic_num,
+                "audio_sha256": recording.source_sha256,
+                "label_sha256": recording.label_sha256,
+                "recording_sidecar_sha256": recording.recording_sidecar_sha256,
+                "stream_start_offset_seconds_relative_to_mic1": (
+                    recording.stream_start_offset_seconds_relative_to_mic1
+                ),
+                "t0_offset_sec": recording.t0_offset_sec,
+                "drop_offset_sec": recording.drop_offset_sec,
+            }
+            for recording in recordings
+        ],
+    }
+    _freeze_protocol(args.output.with_suffix(".protocol.json"), protocol)
+    first_crack_config = mcp["FirstCrackConfig"](
+        mode="audio",
+        repo_id=args.repo_id,
+        revision=args.revision,
+        precision="int8",
+        local_model_dir=None,
+        onnx_threads=args.threads,
+        confidence_threshold=args.threshold,
+        min_positive_windows=args.min_positive_windows,
+        confirmation_window_seconds=args.confirmation_window,
+        allow_manual_override=True,
+    )
+    _verify_input_snapshot(artifact_paths, artifact_snapshot)
+    backend = mcp["build_released_onnx_first_crack_detector_backend"](first_crack_config, artifacts)
+    _verify_input_snapshot(artifact_paths, artifact_snapshot)
+
+    results: list[dict[str, Any]] = []
+    with tempfile.TemporaryDirectory(prefix="mcp-heldout-replay-") as temp:
+        temp_dir = Path(temp)
+        for index, recording in enumerate(recordings, start=1):
+            source_snapshot = _snapshot_recording_audio(recording, temp_dir)
+            replay_path, resampled = _prepare_audio(recording, temp_dir, source_snapshot)
+            print(
+                f"[{index}/{len(recordings)}] {recording.recording_id} "
+                f"({'positive' if recording.region else 'negative'})",
+                flush=True,
+            )
+            result = _evaluate_recording(
+                mcp=mcp,
+                config=first_crack_config,
+                artifacts=artifacts,
+                backend=backend,
+                recording=recording,
+                replay_path=replay_path,
+                resampled=resampled,
+                window_seconds=args.window_seconds,
+                overlap=args.overlap,
+            )
+            results.append(result)
+            if _sha256(source_snapshot) != recording.source_sha256:
+                raise RuntimeError(f"Held-out source snapshot changed during replay: {recording}")
+            print(
+                f"  {result['outcome']}: event={result['detected_sec']}s, "
+                f"confirmed={result['confirmed_sec']}s, "
+                f"max_p={result['max_processed_confidence']:.4f}",
+                flush=True,
+            )
+
+    _verify_input_snapshot(evidence_paths, evidence_snapshot)
+    _verify_input_snapshot(artifact_paths, artifact_snapshot)
+    if _sha256(evaluator_path) != evaluator_sha256:
+        raise RuntimeError("Evaluator script changed during replay")
+
+    report = {
+        "schema_version": 1,
+        "generated_at_unix_seconds": time.time(),
+        "protocol_lock_path": str(args.output.with_suffix(".protocol.json").resolve()),
+        "test_set": {
+            "cohort": "fresh_full_recording_holdout",
+            "split_integrity_path": str(args.split_integrity.resolve()),
+            "chunk_manifest_path": str(args.chunk_manifest.resolve()),
+            "dataset_capture_manifest_path": str(args.dataset_capture_manifest.resolve()),
+            "holdout_capture_manifest_path": str(args.holdout_capture_manifest.resolve()),
+            "physical_session_count": len({item.pair_id for item in recordings}),
+            "bean_origin_count": len({item.origin for item in recordings}),
+            "bean_origins": sorted({item.origin for item in recordings}),
+            "stream_recording_count": len(recordings),
+            "pair_ids_absent_from_all_splits": True,
+            "source_checksums_absent_from_all_splits": True,
+            "authoritative_t0_alignment_present": True,
+            "complete_roast_drop_milestone_present": True,
+            "dataset_exposure_evidence": evidence_snapshot,
+        },
+        "mcp": {"source_path": str(mcp_root), "git_head": git_head},
+        "evaluator": {"path": str(evaluator_path), "sha256": evaluator_sha256},
+        "model": {
+            "repo_id": args.repo_id,
+            "revision": args.revision,
+            "precision": "int8",
+            "onnx_path": str(model_path.resolve()),
+            "onnx_sha256": artifact_snapshot["onnx_model"]["sha256"],
+            "preprocessor_path": str(preprocessor_path.resolve()),
+            "preprocessor_sha256": artifact_snapshot["preprocessor_config"]["sha256"],
+            "training_provenance_path": str(args.training_provenance.resolve()),
+            "training_provenance_sha256": base_evidence_snapshot["training_provenance"]["sha256"],
+            "training_experiment": training_provenance.get("experiment_name"),
+        },
+        "profile": {
+            "sample_rate": SAMPLE_RATE,
+            "window_seconds": args.window_seconds,
+            "overlap": args.overlap,
+            "hop_seconds": hop_seconds,
+            "confidence_threshold": args.threshold,
+            "min_positive_windows": args.min_positive_windows,
+            "confirmation_window_seconds": args.confirmation_window,
+            "onnx_threads": args.threads,
+            "timestamp_policy": "mcp_backdate_to_earliest_qualifying_window_onset",
+        },
+        "recordings": results,
+        "aggregate": _aggregate(results),
+    }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    markdown_path = args.output.with_suffix(".md")
+    _write_markdown(markdown_path, report)
+    print(f"Wrote {args.output} and {markdown_path}")
+    return report
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the command-line parser."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mcp-src", type=Path, required=True)
+    parser.add_argument("--onnx-dir", type=Path, required=True)
+    parser.add_argument(
+        "--training-provenance",
+        type=Path,
+        required=True,
+        help="Bound training_provenance.json produced by provenance-aware ONNX export",
+    )
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--repo-id", default="local/baseline-v6-pair-aware")
+    parser.add_argument("--revision", default=None)
+    parser.add_argument("--threads", type=int, default=8)
+    parser.add_argument("--window-seconds", type=float, default=10.0)
+    parser.add_argument("--overlap", type=float, default=0.7)
+    parser.add_argument("--threshold", type=float, default=0.6)
+    parser.add_argument("--min-positive-windows", type=int, default=5)
+    parser.add_argument("--confirmation-window", type=float, default=20.0)
+    parser.add_argument(
+        "--split-integrity", type=Path, default=Path("data/splits/split_integrity.json")
+    )
+    parser.add_argument(
+        "--chunk-manifest", type=Path, default=Path("data/processed/chunk_manifest.jsonl")
+    )
+    parser.add_argument(
+        "--dataset-capture-manifest",
+        type=Path,
+        default=Path("data/raw/mcp-captures/capture_manifest.json"),
+    )
+    parser.add_argument(
+        "--holdout-capture-manifest",
+        type=Path,
+        default=Path("data/raw/mcp-captures/capture_manifest.json"),
+    )
+    parser.add_argument(
+        "--pair-id",
+        action="append",
+        default=None,
+        help="Fresh physical-session pair ID to replay; repeat for multiple sessions.",
+    )
+    parser.add_argument(
+        "--labels-dir",
+        type=Path,
+        action="append",
+        default=None,
+        help="Repeat for each label directory (default: data/labels/mcp and data/labels).",
+    )
+    return parser
+
+
+def main() -> None:
+    """CLI entry point."""
+    parser = _build_parser()
+    args = parser.parse_args()
+    if args.labels_dir is None:
+        args.labels_dir = [Path("data/labels/mcp"), Path("data/labels")]
+    if args.threads <= 0:
+        parser.error("--threads must be > 0")
+    if not 0.0 <= args.threshold <= 1.0:
+        parser.error("--threshold must be in [0, 1]")
+    if not 0.0 <= args.overlap < 1.0:
+        parser.error("--overlap must be in [0, 1)")
+    evaluate(args)
+
+
+if __name__ == "__main__":
+    main()

@@ -8,12 +8,12 @@ Full pipeline from raw recording to training-ready splits.
 
 ```
 Raw WAV (from the MCP recorder, or scripts/record_mics.py, or legacy Audacity)
-    → data/raw/ (mic{N}-{origin}-roast{n}.wav, per naming convention)
+    → UUID-safe staging + capture_manifest.json
         → Label Studio (annotate mic1's first_crack region)
-            → convert_labelstudio_export.py  (per-file JSON annotations)
-                → propagate_annotations.py    (copy mic1 → paired mics)
+            → convert_labelstudio_export.py  (human mic1 annotations + pair_id)
+                → propagate_annotations.py    (derive mic2 + uncertainty provenance)
                     → chunk_audio.py          (10s WAV chunks)
-                        → dataset_splitter.py (train/val/test splits)
+                        → dataset_splitter.py (pair-level train/val/test splits)
                             → data/splits/    (ready for training)
 ```
 
@@ -44,11 +44,38 @@ Each session directory contains:
 | `roast.recording.json` | The recording manifest (schema v2) — see below. |
 | `{origin}-roast{n}-session.json` | An annotation-pipeline session JSON, shape-compatible with `record_mics.py`, so `propagate_annotations.py` (Step 4) reads it directly. |
 
-These WAVs are already at the model's native **16 kHz** (unlike
-`record_mics.py`'s 44.1 kHz), and `chunk_audio.py` resamples internally anyway, so
-they need no special handling: **copy or rename the `mic*.wav` files into
-`data/raw/`** following the naming convention below, and copy the
-`{origin}-roast{n}-session.json` alongside them so annotation propagation works.
+Do not flatten or rename this directory tree by hand. Original basenames are not
+globally unique: two different physical sessions can legitimately contain the
+same origin/roast filenames. Stage them with the capture ingester instead:
+
+```bash
+# Validate only; hashes every source and writes nothing.
+venv/bin/python -m coffee_first_crack.data_prep.ingest_mcp_captures \
+  --capture-root /Users/sertanyamaner/roasts/captures \
+  --output data/raw/mcp-captures \
+  --dry-run
+
+# Stage validated copies.
+venv/bin/python -m coffee_first_crack.data_prep.ingest_mcp_captures \
+  --capture-root /Users/sertanyamaner/roasts/captures \
+  --output data/raw/mcp-captures
+```
+
+The capture-directory UUID is the immutable `pair_id`. Staged WAV filenames are
+prefixed with it, so duplicate original basenames cannot overwrite one another.
+The ingester validates both sidecars, mic metadata, WAV headers, safe basenames,
+session identity, and destination uniqueness; copies both streams and both
+sidecars; verifies copy checksums; then hashes the sources again to prove they
+did not change. Outputs are local and gitignored:
+
+```
+data/raw/mcp-captures/
+  capture_manifest.json
+  source_checksums.sha256
+  mic1/       # Label Studio import directory: human-labelled tasks only
+  mic2/       # paired automatic-annotation targets; do not import into Label Studio
+  sessions/   # UUID-prefixed copies of both session metadata files
+```
 
 The `roast.recording.json` manifest (written by
 `coffee_roaster_mcp.audio._write_recording_sidecar`) has this shape:
@@ -59,6 +86,7 @@ The `roast.recording.json` manifest (written by
   "session_id": "<run-id>",
   "recording_started_monotonic_seconds": 1234.56,  // monotonic clock at record start; null if unknown
   "milestones": {                                   // recording-relative seconds, or null per milestone
+    "beans_added": 45.2,
     "first_crack": 512.3,
     "drop": 640.0
   },
@@ -80,9 +108,9 @@ The `roast.recording.json` manifest (written by
 }
 ```
 
-The manifest is informational for the training pipeline (`chunk_audio.py` and
-`dataset_splitter.py` do not read it); annotation propagation keys on the
-`{origin}-roast{n}-session.json` instead.
+The staged `capture_manifest.json` is authoritative downstream. It preserves
+origin, roast number, mic number/label, original filename, source path, staged
+path, checksum, duration, and `pair_id` for every stream.
 
 ### 1b. Recordings from `scripts/record_mics.py` (bench dual-mic)
 
@@ -104,8 +132,11 @@ mic2-<origin>-roast<n>.wav          # paired mic (e.g. ATR2100x, ch 1)
 
 These WAVs are **44100 Hz**; `chunk_audio.py` resamples to 16 kHz. Sessions
 shorter than 60 s are saved with a `_partial` suffix and excluded by convention.
-The `-session.json` here is the same shape the MCP recorder writes, so Step 4
-propagation works identically.
+This is a distinct alignment path from MCP capture. The Aggregate Device exposes
+one multichannel CoreAudio stream with Drift Correction, so the recorded bench
+channels are sample-aligned and the legacy propagation mode remains valid.
+coffee-roaster-mcp opens device streams independently; those streams are **not
+sample-locked** and must use manifest-aware uncertainty handling in Step 4.
 
 ### 1c. Legacy: Audacity export
 
@@ -138,7 +169,7 @@ Opens at http://localhost:8080
 ### 2b. Create or open your project
 
 1. Go to **Projects → New Project** (or open your existing first crack project)
-2. Project name: e.g. `Coffee First Crack — Mic2 Brazil`
+2. Project name: e.g. `Coffee First Crack — MCP Mic1 2026-08`
 
 ### 2c. Configure the labelling interface (first time only)
 
@@ -160,8 +191,10 @@ Only the `first_crack` label is needed. Everything outside annotated regions is 
 ### 2d. Import audio files
 
 1. Go to your project → **Import**
-2. Click **Upload Files** and select the WAV files from `data/raw/`
-   - Import all new mic-2 files at once
+2. Click **Upload Files** and select every WAV in:
+   `/Users/sertanyamaner/git/coffee-first-crack-detection/data/raw/mcp-captures/mic1/`
+   - For the 16 Aug 2026 corpus this is exactly **38 mic1 tasks**.
+   - Do not import `mcp-captures/mic2/`; those annotations are derived after export.
 3. Click **Import**
 
 ### 2e. Annotate each file
@@ -190,10 +223,13 @@ Only the `first_crack` label is needed. Everything outside annotated regions is 
 1. Go to your project → **Export**
 2. Format: **JSON**
 3. Click **Export** — this downloads a file like `project-1-at-YYYY-MM-DD-HH-MM-hashcode.json`
-4. Move the exported file to:
+4. Move the exported file to (create the local directory if needed):
    ```
-   /Users/sertanyamaner/git/coffee-first-crack-detection/data/labels/
+   /Users/sertanyamaner/git/coffee-first-crack-detection/data/labels/mcp/labelstudio-export.json
    ```
+
+`data/labels/mcp/` is gitignored. Do not access, copy, or modify Label Studio's
+internal database; the JSON export is the only handoff artifact.
 
 ---
 
@@ -201,12 +237,22 @@ Only the `first_crack` label is needed. Everything outside annotated regions is 
 
 ```bash
 python -m coffee_first_crack.data_prep.convert_labelstudio_export \
-  --input data/labels/project-1-at-2026-04-12-19-41-e5863e6e.json \
-  --output data/labels \
-  --data-root data/raw
+  --input data/labels/mcp/labelstudio-export.json \
+  --output data/labels/mcp \
+  --data-root data/raw \
+  --manifest data/raw/mcp-captures/capture_manifest.json
 ```
 
-This produces one `{stem}.json` annotation file per audio file in `data/labels/`.
+This produces one `{UUID}__{mic1-stem}.json` annotation file per task and records
+the manifest `pair_id`, mic number, original filename, and human Label Studio
+provenance. Unknown tasks, mic2 tasks, ambiguous basenames, missing WAVs, and
+existing output files fail closed.
+
+Label Studio may truncate long UUID-prefixed upload names and append a
+seven-character storage suffix. The converter accepts that form only when the
+retained prefix contains a known manifest `pair_id` and mic number and matches
+the start of the expected staged basename. Unknown or inconsistent truncated
+names fail closed; the export must not be edited by hand.
 
 For multi-mic sessions, you annotate **mic1 only** in Label Studio; Step 4
 propagates that annotation to the paired mics.
@@ -215,33 +261,48 @@ propagates that annotation to the paired mics.
 
 ## Step 4 — Propagate Annotations to Paired Mics
 
-Multi-mic sessions (from the MCP recorder or `record_mics.py`) capture every mic
-sample-locked, so their first-crack timestamps are identical. Annotate **mic1
-only** in Label Studio, then propagate mic1's converted annotation JSON to every
-paired mic in the session:
+For staged MCP captures, derive the linked mic2 annotation from every converted
+human mic1 annotation:
 
 ```bash
-python scripts/propagate_annotations.py --dry-run   # preview
-python scripts/propagate_annotations.py              # create mic2..N annotation JSONs
+venv/bin/python scripts/propagate_annotations.py \
+  --manifest data/raw/mcp-captures/capture_manifest.json \
+  --staging-root data/raw/mcp-captures \
+  --audio-root data/raw \
+  --labels-dir data/labels/mcp \
+  --dry-run
+
+venv/bin/python scripts/propagate_annotations.py \
+  --manifest data/raw/mcp-captures/capture_manifest.json \
+  --staging-root data/raw/mcp-captures \
+  --audio-root data/raw \
+  --labels-dir data/labels/mcp
 ```
 
-**How the pairing works.** `propagate_annotations.py` discovers sessions by
-reading the `{origin}-roast{n}-session.json` files in `data/raw` (the
-`--session-dir`). Each session JSON carries `origin`, `roast_num`, `sample_rate`,
-and a `mics` list of `{mic_num, label, file}` entries. The script reads the
-primary mic's annotation JSON (`--primary-mic`, default `1`) from `data/labels`
-and writes an identical annotation JSON — same `annotations`, per-mic
-`audio_file`/`duration` — for every other mic listed in the session. Sessions
-with no paired mics, and mics whose annotation JSON already exists (without
-`--overwrite`), are skipped.
+MCP devices run on independent clocks and are not sample-locked. Historical
+captures do not record exact per-stream start offsets, so copied mic1 boundary
+timestamps are not represented as exact mic2 ground truth. Each mic2 JSON records:
 
-**This is why the `{origin}-roast{n}-session.json` must sit in `data/raw`
-alongside the WAVs** (Step 1). Both the MCP recorder and `record_mics.py` write
-that file in exactly the shape this script expects, so MCP-captured sessions
-propagate automatically — no extra tooling. If a set of paired WAVs has **no**
-session JSON (e.g. hand-assembled from loose files), propagation cannot pair
-them; in that case annotate each mic by hand in Label Studio and run Step 3 per
-file, skipping this step.
+- `pair_id` and `derived_from`;
+- `derivation_method` and the independent-clock alignment statement;
+- that pair's observed duration delta as a diagnostic, **not** an alignment bound;
+- `alignment_uncertainty_seconds: null` plus the explicit unbounded status;
+- the deterministic training policy.
+
+Because final-duration difference cannot bound independent start delay or drift,
+the chunker excludes **every historical derived mic2 window**. The copied
+timestamps remain deterministic, paired, and auditable on the
+`mic1_session_axis`, but they are not mic2 training ground truth. A future
+annotation may use a finite guard band only when its boundaries have been
+shifted onto the `target_stream_axis` and its provenance names a verified
+audio-alignment or recorded-stream-timestamp method. Every exclusion is written
+to `chunk_manifest.jsonl`. Missing human
+annotations, missing targets, ambiguous identities, malformed paired-mic
+provenance, and pre-existing derived outputs fail instead of being silently
+skipped.
+
+The no-`--manifest` mode remains for the separate sample-aligned Aggregate
+Device bench workflow from `scripts/record_mics.py`.
 
 See `docs/multi_mic_setup.md` for the full paired-recording workflow.
 
@@ -266,6 +327,7 @@ data/processed/
   first_crack/      ← 10s windows that overlap ≥50% with first crack
   no_first_crack/   ← 10s windows of background roast noise
   processing_summary.md
+  chunk_manifest.jsonl  # pair_id, stream identity, inclusion/exclusion provenance
 ```
 
 Chunk filenames encode the source recording and window start time:
@@ -283,7 +345,10 @@ python -m coffee_first_crack.data_prep.dataset_splitter \
   --seed 42
 ```
 
-Splits at the **recording level** (not chunk level) to prevent data leakage — all chunks from the same source recording go to the same split.
+Splits at the **physical pair/session level**, never at microphone filename
+level. Both streams from a roast receive one assignment. Legacy session
+sidecars deterministically group existing pairs such as both Panama microphones;
+legacy single-mic files receive a unique single-recording pair identity.
 
 Output:
 ```
@@ -292,7 +357,132 @@ data/splits/
   val/{first_crack,no_first_crack}/
   test/{first_crack,no_first_crack}/
   split_report.md
+  split_integrity.json  # machine-checkable pair-ID sets and empty intersections
 ```
+
+`split_integrity.json` asserts that train, validation, and test pair-ID
+intersections are empty and reports physical-session counts separately from
+stream/recording counts. The fixed seed makes assignments deterministic.
+
+### Fresh full-recording MCP holdout
+
+Chunk-level test metrics do not prove that a roast produces one correctly timed
+notification. The decisive deployment test replays complete, newly captured
+physical sessions through the actual `coffee-roaster-mcp` ONNX backend, audio
+window pipeline, and confirmation adapter used by the agent harness.
+
+Freeze this protocol **before running inference**:
+
+- unpublished candidate INT8 ONNX SHA-256;
+- 8 ONNX threads on the live Mac profile;
+- 10 s windows, 0.7 overlap (3 s hop), threshold 0.6;
+- 5 qualifying windows within 20 s;
+- mic1 as the primary live-path result and mic2 as paired robustness evidence.
+
+Do not reuse any train, validation, or test session. The superseded 541-window
+v6 test set is not valid final evidence because it included historical derived
+mic2 labels; the corrected v7 test set contains 436 windows, but it is still
+development evidence rather than a fresh full-roast holdout. The
+evaluator rejects a holdout when either its `pair_id` or either source WAV
+checksum was already exposed to a split, including legacy recordings identified
+from the chunk manifest. It also requires authoritative recording-relative
+`beans_added` and `drop` milestones and verifies that drop occurs within both
+WAVs; WAV time zero is never assumed to equal charge. Aborted or incomplete
+recordings fail closed. Each mic1 label must retain human Label Studio
+provenance and exact stream identity; each mic2 label must match its stream and
+retain the derived independent-clock uncertainty provenance.
+
+The candidate must also have been trained and exported through the provenance-aware
+pipeline below. Immediately before training, `rebuild_and_train.sh` writes an
+immutable `training_data_provenance.json` containing the exact split-integrity,
+chunk-manifest, and dataset-capture-manifest hashes. ONNX export binds the local
+checkpoint and exported bytes to that snapshot. The held-out evaluator rejects
+an ONNX model whose bound hashes differ from the audited development evidence.
+This prevents a different model or split from being substituted at replay time.
+
+The 16 Aug corpus does **not** contain a valid fresh holdout. Of 38 captured
+sessions, 34 are represented in the dataset splits. The remaining four are
+5.9–7.25 s aborted/fault captures with no `beans_added` milestone, so they are
+not full roasts and cannot produce even one 10 s detector window.
+
+#### Cohort allocation rule
+
+Assign future sessions to the final holdout **before model inference and before
+adding them to any development dataset**. Reserve 6–10 complete physical roasts,
+preferably 10 (20 WAVs), spanning at least three beans and varied ambient
+conditions. Selection may use capture metadata, but must not use model scores or
+label outcomes. The evaluator enforces at least six unique pair IDs and three
+distinct origins. A held-out `pair_id` reserves both mic1 and mic2 together.
+
+Store the cohort under `data/holdout/`, separate from `data/raw/`, and record its
+pair IDs and source checksums before evaluation. Every session must contain both
+microphones plus an authoritative recording-relative `beans_added`/T0 milestone.
+The authoritative `drop` milestone must also fall within both stream durations.
+Establish FC ground truth afterward by labelling mic1 in Label Studio, ideally
+without viewing model predictions. Mic2 robustness evaluation additionally
+requires verified audio alignment or recorded per-stream timestamps with a
+finite uncertainty and an explicit
+`stream_start_offset_seconds_relative_to_mic1`. The evaluator subtracts that
+offset from the session-axis T0/drop milestones to place them on each WAV's own
+time axis. The historical unbounded derivation policy is deliberately rejected
+by the held-out evaluator. Never pass this tree to chunking, splitting, training,
+validation, threshold selection, or model selection.
+
+After recording fresh sessions, stage them into a separate local holdout tree,
+label only their UUID-prefixed mic1 files in Label Studio, convert the export,
+and establish a verified finite-bound mic2 alignment before replay. Keep their
+pair IDs out of chunking, splitting, model selection, and threshold selection.
+Then run:
+
+```bash
+venv/bin/python scripts/evaluate_mcp_heldout.py \
+  --mcp-src /Users/sertanyamaner/git/coffee-roaster-mcp/src \
+  --onnx-dir exports/onnx-baseline-v8-provenance-aware/int8 \
+  --training-provenance \
+    exports/onnx-baseline-v8-provenance-aware/int8/training_provenance.json \
+  --dataset-capture-manifest data/raw/mcp-captures/capture_manifest.json \
+  --holdout-capture-manifest data/holdout/mcp-captures/capture_manifest.json \
+  --labels-dir data/holdout/labels \
+  --pair-id <fresh-session-uuid-1> \
+  --pair-id <fresh-session-uuid-2> \
+  --pair-id <fresh-session-uuid-3> \
+  --pair-id <fresh-session-uuid-4> \
+  --pair-id <fresh-session-uuid-5> \
+  --pair-id <fresh-session-uuid-6> \
+  --threads 8 --window-seconds 10 --overlap 0.7 \
+  --threshold 0.6 --min-positive-windows 5 --confirmation-window 20 \
+  --output results/baseline_v8_provenance_aware_fresh_mcp_holdout.json
+```
+
+Before the first model call, the command writes a sibling
+`*.protocol.json` lock containing the model/preprocessor hashes, frozen profile,
+pair IDs, WAV/label hashes, T0/drop offsets, mic roles, and hashes for the split,
+chunk, dataset-capture and holdout manifests, selected label JSON, and authoritative
+recording sidecars used to prove non-exposure and timing. It also records the
+bound training-provenance hash and experiment name. Those evidence files
+are reverified after replay. The
+recording sidecar's session and two stream identities must match the selected
+pair. The evaluator hashes itself, copies each checksum-verified WAV into its
+own temporary snapshot, and replays only that snapshot. The selected MCP
+checkout must be clean. Re-running the same output path with any change fails.
+Per roast and per mic, the report preserves:
+
+- pre-FC false notification, miss, and every emitted event count;
+- backdated event error: earliest qualifying window onset minus labelled FC;
+- operational confirmation latency: the fifth qualifying window end plus its
+  measured inference time, minus labelled FC;
+- per-window inference latency; and
+- mic1/mic2 event-time difference, with mic2 uncertainty retained.
+
+If the frozen candidate needs tuning after this replay, those recordings become
+development evidence. Do not tune on them and continue calling them a final
+holdout; reserve newly captured sessions for the next decisive evaluation.
+
+Outcome classification uses the operational notification timestamp, not the
+backdated event timestamp. The latter is retained only for first-qualifying-window
+timing error. For mic2, copied mic1-session-axis label boundaries are shifted by
+the authoritative per-stream start offset before comparison with WAV-relative
+notification times.
 
 ---
 
@@ -305,7 +495,10 @@ generate_recordings_manifest('data/raw', 'data/recordings.csv')
 "
 ```
 
-This auto-parses filenames to extract microphone and coffee origin metadata.
+This parses root-level legacy filenames and also reads every staged
+`capture_manifest.json` below `data/raw`. MCP rows use their UUID-safe relative
+path and preserve `pair_id`, origin, roast number, mic number/label, and original
+filename instead of trying to parse the UUID-prefixed staged basename.
 
 ---
 
@@ -320,7 +513,8 @@ This auto-parses filenames to extract microphone and coffee origin metadata.
 | Legacy (mic-1) | `roast-1-costarica-hermosa-hp-a.wav` | Handled by legacy mapping table |
 | Legacy (mic-1) | `25-10-19_1103-costarica-hermosa-5.alog.wav` | Handled by legacy mapping table |
 
-When recording with two microphones, each mic produces an independent WAV file. Both are annotated (annotations can be propagated via `scripts/propagate_annotations.py`) and treated as separate recordings for splitting.
+When recording with two microphones, each mic produces a distinct stream, but
+the streams share one physical `pair_id` and can never cross splits.
 
 ---
 
@@ -335,7 +529,57 @@ When recording with two microphones, each mic produces an independent WAV file. 
 | Multi-mic recordings | mic-1-new (fifine) | panama-hortigal-estate | 3 roasts | ✅ Annotated |
 | Multi-mic recordings | mic-2-new (audio-technica) | panama-hortigal-estate | 3 roasts | ✅ Annotated |
 
-**Totals** (baseline_v5, per `data/splits/split_report.md`): 21 recordings →
-1,435 chunks (223 first_crack / 1,212 no_first_crack).
+The MCP staging manifest retains all 38 physical capture sessions and all 76
+streams, including colliding original Colombia basenames. Four short/fault
+captures produce no 10 s windows. The corrected training corpus contains 3,547
+included chunks from 52 contributing physical sessions and 89 contributing
+streams: train 2,584, validation 527, and test 436. Every historical derived
+mic2 chunk is excluded because independent-clock alignment uncertainty is
+unbounded; the corresponding annotations and streams remain auditable.
 
-> When adding new recordings, re-run Steps 3–7 to rebuild the full dataset (the chunker and splitter process all annotation files in `data/labels/`).
+The old baseline_v5 split grouped by stream stem and leaked paired Panama roasts
+across splits (roast 1: mic1 train / mic2 test; roast 2: mic2 validation / mic1
+test). Its evaluation is potentially optimistic. The current split groups by
+physical `pair_id`, has empty train/validation/test pair intersections, and is
+deterministic for seed 42.
+
+## Exact resume after the human export
+
+After placing the JSON export at `data/labels/mcp/labelstudio-export.json`, run
+Steps 3 and 4 exactly as shown above. Then resume the deterministic rebuild,
+training, evaluation, and ONNX comparison with:
+
+```bash
+source venv/bin/activate
+./scripts/rebuild_and_train.sh baseline_v8_provenance_aware
+
+python -m coffee_first_crack.export_onnx \
+  --model-dir experiments/baseline_v8_provenance_aware/checkpoint-best \
+  --output-dir exports/onnx-baseline-v8-provenance-aware --quantize \
+  --training-data-provenance \
+    experiments/baseline_v8_provenance_aware/training_data_provenance.json
+
+python scripts/evaluate_onnx.py \
+  --onnx-dir exports/onnx-baseline-v8-provenance-aware/fp32 \
+  --test-dir data/splits/test \
+  --output results/baseline_v8_provenance_aware_fp32_eval.json \
+  --threads 8
+
+python scripts/evaluate_onnx.py \
+  --onnx-dir exports/onnx-baseline-v8-provenance-aware/int8 \
+  --test-dir data/splits/test \
+  --output results/baseline_v8_provenance_aware_int8_eval.json \
+  --threads 8
+```
+
+The completed local v7 candidate measured 95.87% accuracy / 0.8364 F1 / 92.0%
+FC recall for PyTorch and FP32 ONNX. INT8 measured 96.56% accuracy / 0.8598 F1 /
+92.0% FC recall, with 80.7% precision and 205.0 ms p50 inference latency at the
+production setting of eight threads. These are pair-safe chunk metrics, not a
+fresh full-roast deployment result. Do not publish the candidate or replace
+production ONNX artifacts until the frozen holdout protocol above is completed
+and reviewed. Because `baseline_v7_mic1_safe` was trained before immutable
+pre-training snapshots were introduced, it cannot honestly be retroactively
+bound to one and is not eligible for the decisive fresh-holdout replay. Its
+pair-safe chunk metrics remain valid development evidence. Train the next
+candidate with the commands above before evaluating the reserved cohort.

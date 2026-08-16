@@ -1,10 +1,10 @@
 """Propagate primary-mic annotations to all paired mics in a recording session.
 
-Reads session JSON files produced by ``record_mics.py`` and copies the primary
-microphone's per-file annotation JSON (output of ``convert_labelstudio_export``)
-to every other microphone in the session.  Because recordings are captured through
-a CoreAudio Aggregate Device with Drift Correction, event timestamps are
-sample-locked across all channels and require no time adjustment.
+For the bench workflow, reads session JSON files produced by ``record_mics.py``
+and copies a primary annotation across channels captured through one CoreAudio
+Aggregate Device. For staged coffee-roaster-mcp captures, reads the capture
+manifest and creates deterministic mic2 annotations with explicit independent-
+clock uncertainty provenance. MCP streams are not sample-locked.
 
 The script slots between ``convert_labelstudio_export.py`` and ``chunk_audio.py``
 in the data preparation pipeline.  Existing recordings that have no session JSON
@@ -33,16 +33,33 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
 
 import librosa
 
+from coffee_first_crack.data_prep.corpus_manifest import (
+    index_manifest_streams,
+    load_capture_manifest,
+    resolve_within,
+)
+
 # ---------------------------------------------------------------------------
 # I/O helpers
 # ---------------------------------------------------------------------------
+
+
+def sha256_file(path: Path) -> str:
+    """Return the SHA-256 digest of a staged recording."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -231,6 +248,159 @@ def propagate_session(
     return written, skipped
 
 
+def propagate_manifest(
+    manifest_path: Path,
+    labels_dir: Path,
+    staging_root: Path,
+    *,
+    audio_root: Path | None = None,
+    overwrite: bool,
+    dry_run: bool,
+) -> tuple[int, int]:
+    """Derive mic2 annotations for every staged MCP capture pair.
+
+    Boundary timestamps remain on the mic1 time axis for auditability, but
+    historical MCP captures have no measured cross-stream start offset. Final
+    WAV duration differences are diagnostic only and cannot bound that offset,
+    so every derived mic2 chunk is excluded from training until a verified
+    alignment method supplies a defensible finite uncertainty.
+
+    Args:
+        manifest_path: Staged ``capture_manifest.json``.
+        labels_dir: Directory containing converted mic1 annotations and where
+            mic2 annotations are written.
+        staging_root: Root containing the staged ``mic1`` and ``mic2`` WAVs.
+        audio_root: Common root used by ``chunk_audio``. Defaults to
+            ``staging_root``; the derived ``audio_file`` is relative to it.
+        overwrite: Replace an existing derived mic2 annotation when true.
+        dry_run: Report intended writes without changing files.
+
+    Returns:
+        ``(written, skipped)`` counts.
+
+    Raises:
+        FileNotFoundError: If any required mic1 annotation or staged mic2 WAV is
+            missing.
+        ValueError: If a pair is malformed or ambiguous.
+        FileExistsError: If a target exists and overwrite is false.
+    """
+    manifest = load_capture_manifest(manifest_path)
+    manifest_staging_root = Path(manifest["staging_root"]).resolve()
+    if staging_root.resolve() != manifest_staging_root:
+        raise ValueError(
+            f"--staging-root does not match the manifest: "
+            f"{staging_root.resolve()} != {manifest_staging_root}"
+        )
+    _, sessions_by_pair = index_manifest_streams(manifest)
+    resolved_audio_root = (audio_root or staging_root).resolve()
+    skipped = 0
+    plans: list[tuple[Path, Path, dict[str, Any]]] = []
+
+    for pair_id in sorted(sessions_by_pair):
+        session = sessions_by_pair[pair_id]
+        by_mic = {stream["mic_num"]: stream for stream in session["streams"]}
+        if set(by_mic) != {1, 2}:
+            raise ValueError(f"MCP pair {pair_id} must contain exactly mic1 and mic2")
+        primary = by_mic[1]
+        target = by_mic[2]
+        primary_path = labels_dir / f"{Path(primary['staged_relative_path']).stem}.json"
+        target_path = labels_dir / f"{Path(target['staged_relative_path']).stem}.json"
+        if not primary_path.is_file():
+            raise FileNotFoundError(
+                f"Missing human mic1 annotation for pair {pair_id}: {primary_path}"
+            )
+        primary_audio = resolve_within(staging_root, primary["staged_relative_path"])
+        target_audio = resolve_within(staging_root, target["staged_relative_path"])
+        if not primary_audio.is_file():
+            raise FileNotFoundError(f"Missing staged mic1 WAV for pair {pair_id}: {primary_audio}")
+        if not target_audio.is_file():
+            raise FileNotFoundError(f"Missing staged mic2 WAV for pair {pair_id}: {target_audio}")
+        for stream, audio_path in ((primary, primary_audio), (target, target_audio)):
+            if sha256_file(audio_path) != stream["sha256"]:
+                raise ValueError(f"Staged WAV does not match capture manifest: {audio_path}")
+        if not target_audio.is_relative_to(resolved_audio_root):
+            raise ValueError(
+                f"Staged mic2 WAV is outside the configured audio root: {target_audio}"
+            )
+        target_audio_relative = target_audio.relative_to(resolved_audio_root).as_posix()
+        if target_path.exists() and not overwrite:
+            raise FileExistsError(
+                f"Derived annotation already exists for pair {pair_id}: {target_path}"
+            )
+
+        primary_annotation = load_json(primary_path)
+        if primary_annotation.get("pair_id") != pair_id or primary_annotation.get("mic_num") != 1:
+            raise ValueError(f"Human annotation pair identity mismatch: {primary_path}")
+        primary_provenance = primary_annotation.get("provenance")
+        if (
+            not isinstance(primary_provenance, dict)
+            or primary_provenance.get("source_audio_sha256") != primary["sha256"]
+        ):
+            raise ValueError(f"Human annotation source checksum mismatch: {primary_path}")
+        annotations = primary_annotation.get("annotations")
+        if not isinstance(annotations, list):
+            raise ValueError(f"Human annotation has invalid annotations list: {primary_path}")
+        derived_annotations = copy.deepcopy(annotations)
+        for annotation in derived_annotations:
+            if not isinstance(annotation, dict):
+                raise ValueError(f"Human annotation region is not an object: {primary_path}")
+            if annotation.get("label") != "first_crack":
+                raise ValueError(f"Human annotation has an unsupported label: {primary_path}")
+            start = annotation.get("start_time")
+            end = annotation.get("end_time")
+            if (
+                not isinstance(start, (int, float))
+                or isinstance(start, bool)
+                or not isinstance(end, (int, float))
+                or isinstance(end, bool)
+                or not math.isfinite(float(start))
+                or not math.isfinite(float(end))
+                or start < 0
+                or end <= start
+                or end > primary["duration_seconds"]
+            ):
+                raise ValueError(f"Human annotation has invalid boundaries: {primary_path}")
+            annotation["confidence"] = "derived_unaligned_excluded_from_training"
+        derived: dict[str, Any] = {
+            "audio_file": target_audio_relative,
+            "duration": target["duration_seconds"],
+            "sample_rate": target["sample_rate"],
+            "annotations": derived_annotations,
+            "pair_id": pair_id,
+            "mic_num": 2,
+            "origin": session["origin"],
+            "roast_num": session["roast_num"],
+            "original_filename": target["original_filename"],
+            "provenance": {
+                "annotation_source": "derived_from_paired_mic",
+                "pair_id": pair_id,
+                "derived_from": primary["staged_relative_path"],
+                "derivation_method": "copy_timestamps_for_audit_only",
+                "boundary_time_axis": "mic1_session_axis",
+                "alignment": "independent_clocks_not_sample_locked",
+                "observed_pair_duration_delta_seconds": session["observed_duration_delta_seconds"],
+                "alignment_uncertainty_seconds": None,
+                "alignment_uncertainty_status": (
+                    "unbounded_historical_missing_stream_start_offsets"
+                ),
+                "uncertainty_basis": "duration_delta_is_diagnostic_not_an_alignment_bound",
+                "training_policy": "exclude_all_derived_mic2_without_verified_alignment",
+                "exact_stream_start_offsets_available": False,
+                "source_audio_sha256": target["sha256"],
+            },
+        }
+        plans.append((target_path, primary_path, derived))
+
+    for target_path, primary_path, derived in plans:
+        if dry_run:
+            print(f"[dry-run] Would derive {target_path.name} from {primary_path.name}")
+        else:
+            write_json(target_path, derived)
+            print(f"Derived {target_path.name} from {primary_path.name} (excluded: unaligned)")
+
+    return len(plans), skipped
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -278,7 +448,39 @@ def main() -> None:
         action="store_true",
         help="Print intended writes without writing anything",
     )
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help="Staged MCP capture_manifest.json; enables uncertainty-aware MCP derivation",
+    )
+    parser.add_argument(
+        "--staging-root",
+        type=Path,
+        default=None,
+        help="Staged MCP corpus root (defaults to the manifest parent)",
+    )
+    parser.add_argument(
+        "--audio-root",
+        type=Path,
+        default=None,
+        help="Common chunker audio root; derived audio paths are relative to it",
+    )
     args = parser.parse_args()
+
+    if args.manifest is not None:
+        staging_root = args.staging_root or args.manifest.parent
+        written, skipped = propagate_manifest(
+            args.manifest,
+            args.labels_dir,
+            staging_root,
+            audio_root=args.audio_root,
+            overwrite=args.overwrite,
+            dry_run=args.dry_run,
+        )
+        verb = "Would derive" if args.dry_run else "Derived"
+        print(f"{verb} {written} MCP annotation file(s). {skipped} skipped.")
+        return
 
     if not args.session_dir.exists():
         print(f"❌ Session directory not found: {args.session_dir}")

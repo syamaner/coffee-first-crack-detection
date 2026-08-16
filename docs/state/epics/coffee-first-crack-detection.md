@@ -2,7 +2,7 @@
 
 **GitHub Issue**: [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1)
 **Status**: 🔄 Active — Phase 7 complete (S19 + S20 delivered); recording data collection in progress
-**Last Updated**: 2026-04-11
+**Last Updated**: 2026-08-16
 
 ## Objective
 Create a standalone, HuggingFace-publishable repository for training, evaluating, and publishing the coffee first crack audio detection model. Extracted from the `coffee-roasting` monorepo. Targets M3+ Mac (MPS), RTX 4090 (CUDA), and Raspberry Pi 5 (ONNX/CPU).
@@ -101,12 +101,42 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
   - Uses `mic['file']` from session JSON — handles `_partial` suffix and future naming variants
   - Slots between `convert_labelstudio_export.py` and `chunk_audio.py`; zero pipeline changes
   - 16 tests; Copilot review comments addressed (PR #48)
+- [x] S22 [#68](https://github.com/syamaner/coffee-first-crack-detection/issues/68): Session-aware MCP corpus ingestion and leakage-free pair splitting
+  - UUID-safe staging for 38 independent-clock two-mic capture sessions
+  - Human mic1 Label Studio boundary; deterministic mic2 derivation with uncertainty exclusions
+  - Pair-level chunk provenance, splitting, and machine-checkable integrity report
 
 ---
 
 ## Active Context
 
 **Phase 7 complete.** S19 (#46) + S20 (#47) delivered in PR #48.
+
+**S22 implementation, mic1-safe retraining, and ONNX comparison complete; fresh full-roast
+holdout pending — PR review pending** (#68):
+- all 38 submitted mic1 tasks converted (18 with a region, 20 explicitly empty) and all 38
+  linked mic2 annotations retained with explicit unbounded historical alignment provenance
+- duration delta is diagnostic, not an alignment bound; every historical derived mic2 chunk is
+  excluded from training while all 38 pair identities and both streams remain auditable
+- corrected rebuild: 3,547 usable chunks from 52 physical sessions / 89 retained streams;
+  pair-level seed-42 split train 2,584 / validation 527 / test 436, with empty pair intersections
+- the earlier `baseline_v6_pair_aware` 5,612-chunk/541-test metrics and latency are withdrawn:
+  that candidate used mic2 labels that the final unbounded-alignment policy rejects
+- `baseline_v7_mic1_safe` PyTorch test: 95.87% accuracy / 0.8364 F1 / 92.0% recall /
+  76.67% precision / 0.9710 ROC-AUC on the 436 pair-safe chunks
+- 8-thread FP32 ONNX matches PyTorch quality (p50 384.5 ms); INT8: 96.56% accuracy /
+  0.8598 F1 / 92.0% recall / 80.7% precision / 0.9720 ROC-AUC (p50 205.0 ms), passing
+  the 500 ms live-profile latency target
+- exact-MCP full-recording replay harness added with immutable protocol locking, pair/checksum
+  independence checks, authoritative recording-relative T0, mic1-primary/mic2-robustness
+  reporting, separate backdated-event versus operational-confirmation timing, and mandatory
+  checkpoint/ONNX binding to an immutable pre-training dataset snapshot
+- decisive full-roast replay remains pending: 34/38 MCP sessions are already split-exposed; the
+  only four unseen sessions are 5.9–7.25 s aborted/fault captures with no charge milestone
+- no model was published and no production ONNX artifact was replaced
+- `baseline_v7_mic1_safe` predates the immutable pre-training snapshot and therefore remains
+  development evidence rather than an eligible decisive-holdout candidate; the next candidate
+  must be rebuilt and exported through the provenance-aware pipeline before fresh-cohort replay
 
 **S19 — Multi-mic recording** (`scripts/record_mics.py`):
 - `RoastMics` CoreAudio Aggregate Device: FIFINE K669B (ch 0, Primary Clock) + ATR2100x (ch 1, Drift Correction)
@@ -130,7 +160,8 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 
 **Dataset v3**: 1,435 fixed 10s chunks from 21 recordings (9 legacy + 6 mic2-amplified + 3 mic1-panama + 3 mic2-panama)
 - 223 first_crack (~16%) / 1,212 no_first_crack (~84%)
-- Recording-level splitting prevents data leakage
+- The baseline_v5 split grouped by stream/recording stem and leaks paired Panama roasts;
+  S22 replaces it with physical-pair splitting before the next evaluation
 - 6 older mic2 recordings amplified (+11–13 dB) to match calibrated gain, re-annotated
 - 3 panama roasts recorded with dual mics (FIFINE + Audio-Technica), separate hardware
 
@@ -212,6 +243,10 @@ python scripts/push_to_hub.py \
 | **baseline_v5 (partial freeze + aug)** | **98.0%** | **0.932** | **97.6%** | **1,435 chunks, 21 recs, 14M trainable, 303-sample test set, 1 FN / 5 FP, precision 89.1%, ROC-AUC 0.9979 (re-measured 12 Jul, #55)** |
 | ONNX FP32, baseline_v5 (Mac, 2 threads) | 98.0% | 0.932 | 97.6% | p50=429ms ✅ (re-benchmarked 12 Jul, #55 — matches AST/PyTorch exactly) |
 | ONNX INT8, baseline_v5 (Mac, 2 threads) | 98.3% | 0.943 | 97.6% | p50=216ms ✅ (re-benchmarked 12 Jul, #55 — 4 FP, marginally better precision than fp32) |
+| baseline_v6_pair_aware | withdrawn | withdrawn | withdrawn | Superseded 5,612-chunk candidate used historical derived mic2 labels that the final unbounded-alignment policy excludes; its 541-window quality and latency are not valid evidence for S22 |
+| **baseline_v7_mic1_safe (pair-safe)** | **95.87%** | **0.8364** | **92.0%** | **3,547 included chunks, 52 physical sessions / 89 streams, 436-window test, 4 FN / 14 FP, precision 76.67%, ROC-AUC 0.9710; no historical derived mic2 chunks; not published** |
+| ONNX FP32, baseline_v7_mic1_safe (Mac, 8 threads) | 95.87% | 0.8364 | 92.0% | same 436-window pair-safe test, p50=384.5ms / p95=404.0ms / mean=388.5ms; not a fresh full-roast holdout; not published |
+| ONNX INT8, baseline_v7_mic1_safe (Mac, 8 threads) | 96.56% | 0.8598 | 92.0% | same 436-window pair-safe test, 4 FN / 11 FP, precision 80.7%, ROC-AUC 0.9720, p50=205.0ms / p95=212.8ms / mean=206.3ms; not a fresh full-roast holdout; not published |
 | ONNX INT8 (RPi5, 4 threads, fan) | 93.3% | 0.933 | 95.5% | p50=2,070ms ⭐ recommended (pre-baseline_v5 ONNX validation, see note below) |
 | ONNX INT8 (RPi5, 2 threads) | 93.3% | 0.933 | 95.5% | p50=2,436ms ⚠️ thermal throttled (pre-baseline_v5 ONNX validation, see note below) |
 | ONNX INT8 (RPi5, 1 thread) | 93.3% | 0.933 | 95.5% | p50=4,441ms ⚠️ (pre-baseline_v5 ONNX validation, see note below) |

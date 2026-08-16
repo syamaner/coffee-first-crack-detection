@@ -11,6 +11,7 @@ import coffee_first_crack.data_prep.convert_labelstudio_export as convert_labels
 from coffee_first_crack.data_prep.chunk_audio import (
     chunk_recording,
     compute_overlap,
+    discover_annotation_files,
     label_window,
 )
 from coffee_first_crack.data_prep.convert_labelstudio_export import (
@@ -123,6 +124,21 @@ class TestLabelWindow:
 # ---------------------------------------------------------------------------
 # chunk_recording
 # ---------------------------------------------------------------------------
+
+
+def test_discover_annotation_files_excludes_canonical_label_studio_export(
+    tmp_path: Path,
+) -> None:
+    """The human export task list is never parsed as a recording annotation."""
+    annotation = tmp_path / "pair__mic1-roast1.json"
+    annotation.write_text("{}", encoding="utf-8")
+    (tmp_path / "labelstudio-export.json").write_text("[]", encoding="utf-8")
+    (tmp_path / "labelstudio-export-backup.json").write_text("[]", encoding="utf-8")
+    backup_dir = tmp_path / "bak"
+    backup_dir.mkdir()
+    (backup_dir / "pair__mic1-roast1.json").write_text("{}", encoding="utf-8")
+
+    assert discover_annotation_files(tmp_path) == [annotation]
 
 
 class TestChunkRecording:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import json
 from pathlib import Path
 
 import numpy as np
@@ -135,10 +137,68 @@ class TestGenerateRecordingsManifest:
         assert "microphone" in content
 
     def test_row_count(self, raw_dir: Path, tmp_path: Path) -> None:
-        import csv
-
         out = tmp_path / "recordings.csv"
         generate_recordings_manifest(raw_dir, out)
         with out.open() as f:
             rows = list(csv.DictReader(f))
         assert len(rows) == 3  # 3 WAV files in raw_dir fixture
+
+    def test_includes_staged_mcp_streams_with_manifest_metadata(self, tmp_path: Path) -> None:
+        """UUID-safe nested streams remain present and retain their physical identity."""
+        raw_dir = tmp_path / "raw"
+        staging_root = raw_dir / "mcp-captures"
+        pair_id = "a" * 32
+        streams = []
+        for mic_num, label in ((1, "detector"), (2, "usb-paired")):
+            relative = f"mic{mic_num}/{pair_id}__mic{mic_num}-bean-a-roast1.wav"
+            _write_wav(staging_root / relative)
+            streams.append(
+                {
+                    "mic_num": mic_num,
+                    "label": label,
+                    "original_filename": f"mic{mic_num}-bean-a-roast1.wav",
+                    "source_path": str(tmp_path / f"source-mic{mic_num}.wav"),
+                    "staged_relative_path": relative,
+                    "size_bytes": 1,
+                    "sha256": str(mic_num) * 64,
+                    "duration_seconds": 10.0,
+                    "sample_rate": 16_000,
+                }
+            )
+        manifest = {
+            "schema_version": 1,
+            "source_root": str(tmp_path / "captures"),
+            "staging_root": str(staging_root),
+            "session_count": 1,
+            "stream_count": 2,
+            "mic1_task_count": 1,
+            "max_observed_duration_delta_seconds": 0.0,
+            "source_files_verified_unchanged": True,
+            "sessions": [
+                {
+                    "pair_id": pair_id,
+                    "origin": "bean-a",
+                    "roast_num": 1,
+                    "source_session_dir": str(tmp_path / "captures" / pair_id),
+                    "session_sidecar_source_path": str(tmp_path / "session.json"),
+                    "session_sidecar_staged_relative_path": "metadata/session.json",
+                    "recording_sidecar_source_path": str(tmp_path / "recording.json"),
+                    "recording_sidecar_staged_relative_path": "metadata/recording.json",
+                    "observed_duration_delta_seconds": 0.0,
+                    "streams": streams,
+                }
+            ],
+        }
+        (staging_root / "capture_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        out = tmp_path / "recordings.csv"
+
+        generate_recordings_manifest(raw_dir, out)
+
+        with out.open() as handle:
+            rows = list(csv.DictReader(handle))
+        assert len(rows) == 2
+        assert {row["pair_id"] for row in rows} == {pair_id}
+        assert {row["coffee_origin"] for row in rows} == {"bean-a"}
+        assert {row["mic_num"] for row in rows} == {"1", "2"}
+        assert {row["microphone"] for row in rows} == {"detector", "usb-paired"}
+        assert all(row["filename"].startswith("mcp-captures/mic") for row in rows)

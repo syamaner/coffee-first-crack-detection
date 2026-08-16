@@ -215,6 +215,9 @@ data/splits/
 experiments/
 exports/
 results/*.log
+# Local leakage-free evaluation outputs are reported in the PR, not committed.
+results/baseline_v6_pair_aware_*
+results/baseline_v7_mic1_safe_*
 venv/
 *.onnx
 *.safetensors
@@ -223,3 +226,5 @@ docs/notes.md
 docs/posts/**/*
 **/.DS_Store
 data/labels/bak/**/*
+# MCP Label Studio exports and generated per-stream annotations are local data.
+data/labels/mcp/

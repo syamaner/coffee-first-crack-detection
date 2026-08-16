@@ -49,7 +49,9 @@ echo "=============================================="
 echo ""
 echo "📦 Step 1/5: Cleaning existing processed data and splits..."
 rm -rf data/processed/first_crack data/processed/no_first_crack data/processed/processing_summary.md
+rm -f data/processed/chunk_manifest.jsonl
 rm -rf data/splits/train data/splits/val data/splits/test data/splits/split_report.md
+rm -f data/splits/split_integrity.json
 echo "   Done."
 
 # ── Step 2: Chunk all annotated recordings ───────────────────────────────────
@@ -62,12 +64,22 @@ echo "🎵 Step 2/5: Chunking all annotated recordings into 10s windows..."
 
 # ── Step 3: Stratified train/val/test split ──────────────────────────────────
 echo ""
-echo "🔀 Step 3/5: Splitting into train/val/test (70/15/15, recording-level)..."
+echo "🔀 Step 3/5: Splitting into train/val/test (70/15/15, physical-pair-level)..."
 "$PYTHON" -m coffee_first_crack.data_prep.dataset_splitter \
   --input data/processed \
   --output data/splits \
   --train 0.7 --val 0.15 --test 0.15 \
   --seed 42
+
+# Freeze the exact manifests before the trainer sees any data. The ONNX export
+# later consumes this immutable-intent snapshot and binds the artifact digest to
+# the same evidence used by the held-out replay.
+"$PYTHON" -m coffee_first_crack.training_provenance \
+  --experiment-name "${EXPERIMENT_NAME}" \
+  --split-integrity data/splits/split_integrity.json \
+  --chunk-manifest data/processed/chunk_manifest.jsonl \
+  --dataset-capture-manifest data/raw/mcp-captures/capture_manifest.json \
+  --output "experiments/${EXPERIMENT_NAME}/training_data_provenance.json"
 
 # ── Step 4: Train ────────────────────────────────────────────────────────────
 echo ""
