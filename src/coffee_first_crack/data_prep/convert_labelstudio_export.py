@@ -14,6 +14,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -31,6 +32,16 @@ from coffee_first_crack.data_prep.corpus_manifest import (
 )
 
 SAMPLE_RATE = 44100
+
+
+def _sha256(path: Path) -> str:
+    """Return a staged source digest for manifest binding."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
 
 # Label Studio prefixes uploads with an 8-char hex hash or a UUID-like string.
 _LABEL_STUDIO_HASH_RE = re.compile(
@@ -180,10 +191,18 @@ def convert_task(
             f"Resolved audio file does not exist or is not a file: {local_audio_path}"
         )
 
+    manifest_source_sha256: str | None = None
+    if stream is not None:
+        manifest_source_sha256 = stream["sha256"]
+        if _sha256(local_audio_path) != manifest_source_sha256:
+            raise ValueError(f"Staged WAV does not match capture manifest: {local_audio_path}")
+
     try:
         duration = librosa.get_duration(path=str(local_audio_path))
     except Exception as exc:
         raise RuntimeError(f"Failed to read duration for audio file: {local_audio_path}") from exc
+    if manifest_source_sha256 is not None and _sha256(local_audio_path) != manifest_source_sha256:
+        raise RuntimeError(f"Staged WAV changed while reading metadata: {local_audio_path}")
 
     annotations: list[dict[str, Any]] = []
     raw_annotations = task.get("annotations")
@@ -267,6 +286,7 @@ def convert_task(
                     "annotation_source": "human_label_studio",
                     "pair_id": session["pair_id"],
                     "staged_from": stream["source_path"],
+                    "source_audio_sha256": manifest_source_sha256,
                 },
             }
         )

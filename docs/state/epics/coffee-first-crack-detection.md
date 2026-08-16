@@ -129,10 +129,14 @@ holdout pending — PR review pending** (#68):
   the 500 ms live-profile latency target
 - exact-MCP full-recording replay harness added with immutable protocol locking, pair/checksum
   independence checks, authoritative recording-relative T0, mic1-primary/mic2-robustness
-  reporting, and separate backdated-event versus operational-confirmation timing
+  reporting, separate backdated-event versus operational-confirmation timing, and mandatory
+  checkpoint/ONNX binding to an immutable pre-training dataset snapshot
 - decisive full-roast replay remains pending: 34/38 MCP sessions are already split-exposed; the
   only four unseen sessions are 5.9–7.25 s aborted/fault captures with no charge milestone
 - no model was published and no production ONNX artifact was replaced
+- `baseline_v7_mic1_safe` predates the immutable pre-training snapshot and therefore remains
+  development evidence rather than an eligible decisive-holdout candidate; the next candidate
+  must be rebuilt and exported through the provenance-aware pipeline before fresh-cohort replay
 
 **S19 — Multi-mic recording** (`scripts/record_mics.py`):
 - `RoastMics` CoreAudio Aggregate Device: FIFINE K669B (ch 0, Primary Clock) + ATR2100x (ch 1, Drift Correction)

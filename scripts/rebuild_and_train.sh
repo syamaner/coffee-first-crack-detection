@@ -71,6 +71,16 @@ echo "🔀 Step 3/5: Splitting into train/val/test (70/15/15, physical-pair-leve
   --train 0.7 --val 0.15 --test 0.15 \
   --seed 42
 
+# Freeze the exact manifests before the trainer sees any data. The ONNX export
+# later consumes this immutable-intent snapshot and binds the artifact digest to
+# the same evidence used by the held-out replay.
+"$PYTHON" -m coffee_first_crack.training_provenance \
+  --experiment-name "${EXPERIMENT_NAME}" \
+  --split-integrity data/splits/split_integrity.json \
+  --chunk-manifest data/processed/chunk_manifest.jsonl \
+  --dataset-capture-manifest data/raw/mcp-captures/capture_manifest.json \
+  --output "experiments/${EXPERIMENT_NAME}/training_data_provenance.json"
+
 # ── Step 4: Train ────────────────────────────────────────────────────────────
 echo ""
 echo "🏋️ Step 4/5: Training model (experiment: ${EXPERIMENT_NAME})..."

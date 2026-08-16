@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,8 @@ import pytest
 import scripts.propagate_annotations as propagation
 from coffee_first_crack.data_prep import convert_labelstudio_export as conversion
 from coffee_first_crack.data_prep.corpus_manifest import CaptureManifest
+
+STUB_SHA256 = hashlib.sha256(b"stub").hexdigest()
 
 
 def _manifest(staging_root: Path) -> CaptureManifest:
@@ -26,7 +29,7 @@ def _manifest(staging_root: Path) -> CaptureManifest:
                 "source_path": f"/captures/{pair_id}/mic{mic_num}.wav",
                 "staged_relative_path": f"mic{mic_num}/{name}",
                 "size_bytes": 4,
-                "sha256": "0" * 64,
+                "sha256": STUB_SHA256,
                 "duration_seconds": duration,
                 "sample_rate": 16_000,
             }
@@ -95,6 +98,54 @@ def test_manifest_conversion_preserves_human_pair_provenance(
     assert converted["audio_file"].startswith("mcp/mic1/")
     assert converted["sample_rate"] == 16_000
     assert converted["provenance"]["annotation_source"] == "human_label_studio"
+    assert converted["provenance"]["source_audio_sha256"] == STUB_SHA256
+
+
+def test_manifest_conversion_rejects_staged_wav_checksum_mismatch(
+    tmp_path: Path,
+) -> None:
+    """A staged file cannot be substituted after the capture manifest is written."""
+    staging_root = tmp_path / "mcp"
+    manifest = _manifest(staging_root)
+    mic1 = manifest["sessions"][0]["streams"][0]
+    audio_path = staging_root / mic1["staged_relative_path"]
+    audio_path.parent.mkdir(parents=True)
+    audio_path.write_bytes(b"substituted")
+
+    with pytest.raises(ValueError, match="does not match capture manifest"):
+        conversion.convert_task(
+            {
+                "file_upload": f"deadbeef-{audio_path.name}",
+                "annotations": [{"result": []}],
+            },
+            tmp_path,
+            manifest,
+        )
+
+
+def test_manifest_conversion_rejects_wav_changed_during_metadata_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A concurrent staged-file change fails before annotation conversion."""
+    staging_root = tmp_path / "mcp"
+    manifest = _manifest(staging_root)
+    mic1 = manifest["sessions"][0]["streams"][0]
+    audio_path = staging_root / mic1["staged_relative_path"]
+    audio_path.parent.mkdir(parents=True)
+    audio_path.write_bytes(b"stub")
+    digests = iter((STUB_SHA256, "0" * 64))
+    monkeypatch.setattr(conversion, "_sha256", lambda _: next(digests))
+    monkeypatch.setattr(conversion.librosa, "get_duration", lambda **_: 100.0)
+
+    with pytest.raises(RuntimeError, match="changed while reading metadata"):
+        conversion.convert_task(
+            {
+                "file_upload": f"deadbeef-{audio_path.name}",
+                "annotations": [{"result": []}],
+            },
+            tmp_path,
+            manifest,
+        )
 
 
 @pytest.mark.parametrize(("start", "end"), [(float("nan"), 50.0), (20.0, float("nan"))])
@@ -266,8 +317,11 @@ def test_manifest_derivation_records_uncertainty_and_pair_identity(tmp_path: Pat
     _write_manifest(manifest_path, manifest)
     session = manifest["sessions"][0]
     primary, target = session["streams"]
+    primary_audio = staging_root / primary["staged_relative_path"]
     target_audio = staging_root / target["staged_relative_path"]
+    primary_audio.parent.mkdir(parents=True)
     target_audio.parent.mkdir(parents=True)
+    primary_audio.write_bytes(b"stub")
     target_audio.write_bytes(b"stub")
     primary_label_path = labels_dir / f"{Path(primary['staged_relative_path']).stem}.json"
     primary_label_path.write_text(
@@ -279,6 +333,11 @@ def test_manifest_derivation_records_uncertainty_and_pair_identity(tmp_path: Pat
                 "pair_id": session["pair_id"],
                 "mic_num": 1,
                 "annotations": [{"start_time": 20.0, "end_time": 50.0, "label": "first_crack"}],
+                "provenance": {
+                    "annotation_source": "human_label_studio",
+                    "pair_id": session["pair_id"],
+                    "source_audio_sha256": primary["sha256"],
+                },
             }
         ),
         encoding="utf-8",
@@ -298,6 +357,8 @@ def test_manifest_derivation_records_uncertainty_and_pair_identity(tmp_path: Pat
     assert derived["pair_id"] == session["pair_id"]
     assert derived["mic_num"] == 2
     assert derived["provenance"]["derived_from"] == primary["staged_relative_path"]
+    assert derived["provenance"]["boundary_time_axis"] == "mic1_session_axis"
+    assert derived["provenance"]["source_audio_sha256"] == target["sha256"]
     assert derived["provenance"]["alignment_uncertainty_seconds"] is None
     assert derived["provenance"]["alignment_uncertainty_status"] == (
         "unbounded_historical_missing_stream_start_offsets"
@@ -307,6 +368,53 @@ def test_manifest_derivation_records_uncertainty_and_pair_identity(tmp_path: Pat
     assert derived["provenance"]["training_policy"] == (
         "exclude_all_derived_mic2_without_verified_alignment"
     )
+
+
+def test_manifest_derivation_rejects_staged_wav_checksum_mismatch(tmp_path: Path) -> None:
+    """Mic2 propagation verifies both staged streams against the capture manifest."""
+    staging_root = tmp_path / "mcp"
+    labels_dir = tmp_path / "labels"
+    labels_dir.mkdir()
+    manifest = _manifest(staging_root)
+    manifest_path = staging_root / "capture_manifest.json"
+    staging_root.mkdir()
+    _write_manifest(manifest_path, manifest)
+    session = manifest["sessions"][0]
+    primary, target = session["streams"]
+    primary_audio = staging_root / primary["staged_relative_path"]
+    target_audio = staging_root / target["staged_relative_path"]
+    primary_audio.parent.mkdir(parents=True)
+    target_audio.parent.mkdir(parents=True)
+    primary_audio.write_bytes(b"stub")
+    target_audio.write_bytes(b"substituted")
+    primary_label_path = labels_dir / f"{Path(primary['staged_relative_path']).stem}.json"
+    primary_label_path.write_text(
+        json.dumps(
+            {
+                "audio_file": primary["staged_relative_path"],
+                "duration": 100.0,
+                "sample_rate": 16_000,
+                "pair_id": session["pair_id"],
+                "mic_num": 1,
+                "annotations": [],
+                "provenance": {
+                    "annotation_source": "human_label_studio",
+                    "pair_id": session["pair_id"],
+                    "source_audio_sha256": primary["sha256"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="does not match capture manifest"):
+        propagation.propagate_manifest(
+            manifest_path,
+            labels_dir,
+            staging_root,
+            overwrite=False,
+            dry_run=False,
+        )
 
 
 def test_manifest_derivation_fails_on_missing_human_annotation(tmp_path: Path) -> None:

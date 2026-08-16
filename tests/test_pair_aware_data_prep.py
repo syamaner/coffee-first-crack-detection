@@ -21,6 +21,8 @@ from coffee_first_crack.data_prep.dataset_splitter import (
     recording_level_split,
 )
 
+STUB_SHA256 = hashlib.sha256(b"stub").hexdigest()
+
 
 def test_uncertainty_guard_excludes_only_boundary_sensitive_windows() -> None:
     regions = [{"start_time": 20.0, "end_time": 50.0, "label": "first_crack"}]
@@ -48,8 +50,10 @@ def test_derived_boundary_windows_are_reported_and_not_written(
                 "annotations": [{"start_time": 20.0, "end_time": 50.0, "label": "first_crack"}],
                 "provenance": {
                     "annotation_source": "derived_from_paired_mic",
+                    "source_audio_sha256": STUB_SHA256,
                     "pair_id": "pair-1",
                     "derived_from": "mic1/pair-1__mic1-roast.wav",
+                    "boundary_time_axis": "target_stream_axis",
                     "derivation_method": "verified_audio_alignment",
                     "alignment_uncertainty_seconds": 3.5,
                     "training_policy": "exclude_windows_intersecting_boundary_guard_band",
@@ -101,8 +105,10 @@ def test_unaligned_derived_mic2_excludes_every_chunk(
                 "annotations": [{"start_time": 20.0, "end_time": 50.0, "label": "first_crack"}],
                 "provenance": {
                     "annotation_source": "derived_from_paired_mic",
+                    "source_audio_sha256": STUB_SHA256,
                     "pair_id": "pair-1",
                     "derived_from": "mic1/pair-1__mic1-roast.wav",
+                    "boundary_time_axis": "mic1_session_axis",
                     "alignment_uncertainty_seconds": None,
                     "alignment_uncertainty_status": (
                         "unbounded_historical_missing_stream_start_offsets"
@@ -169,8 +175,10 @@ def test_derived_mic2_identity_cannot_cross_pairs(
                 "annotations": [],
                 "provenance": {
                     "annotation_source": "derived_from_paired_mic",
+                    "source_audio_sha256": STUB_SHA256,
                     "pair_id": provenance_pair,
                     "derived_from": derived_from,
+                    "boundary_time_axis": "mic1_session_axis",
                     "alignment_uncertainty_seconds": None,
                     "alignment_uncertainty_status": (
                         "unbounded_historical_missing_stream_start_offsets"
@@ -229,6 +237,7 @@ def test_human_mic1_identity_cannot_cross_pairs_or_streams(
                 "annotations": [],
                 "provenance": {
                     "annotation_source": "human_label_studio",
+                    "source_audio_sha256": STUB_SHA256,
                     "pair_id": provenance_pair,
                 },
             }
@@ -282,6 +291,53 @@ def test_source_audio_cannot_change_while_decoding(
         )
 
 
+@pytest.mark.parametrize(
+    ("pair_id", "mic_num", "audio_file"),
+    [
+        ("pair-1", None, "pair-1__mic2-roast.wav"),
+        ("pair-1", 3, "pair-1__mic2-roast.wav"),
+        (None, None, "pair-1__mic2-roast.wav"),
+    ],
+)
+def test_incomplete_mcp_identity_cannot_fall_back_to_legacy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pair_id: str | None,
+    mic_num: int | None,
+    audio_file: str,
+) -> None:
+    """Pair-only and UUID-staged annotations always require full MCP provenance."""
+    audio_root = tmp_path / "audio"
+    audio_root.mkdir()
+    (audio_root / audio_file).write_bytes(b"stub")
+    annotation_path = tmp_path / "malformed.json"
+    annotation_path.write_text(
+        json.dumps(
+            {
+                "audio_file": audio_file,
+                "pair_id": pair_id,
+                "mic_num": mic_num,
+                "annotations": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        chunking.librosa,
+        "load",
+        lambda *_args, **_kwargs: (np.zeros(20 * 100, dtype=np.float32), 100),
+    )
+
+    with pytest.raises(ValueError, match="Paired MCP annotation lacks required provenance"):
+        process_recording(
+            annotation_path,
+            audio_root,
+            tmp_path / "processed",
+            window_size=10.0,
+            sample_rate=100,
+        )
+
+
 def test_paired_mic2_without_derived_provenance_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -324,8 +380,10 @@ def test_paired_mic2_without_derived_provenance_fails_closed(
         (
             {
                 "annotation_source": "derived_from_paired_mic",
+                "source_audio_sha256": STUB_SHA256,
                 "pair_id": "pair-1",
                 "derived_from": "mic1/pair-1__mic1-roast.wav",
+                "boundary_time_axis": "mic1_session_axis",
                 "alignment_uncertainty_seconds": 1.0,
                 "alignment_uncertainty_status": (
                     "unbounded_historical_missing_stream_start_offsets"
@@ -337,8 +395,10 @@ def test_paired_mic2_without_derived_provenance_fails_closed(
         (
             {
                 "annotation_source": "derived_from_paired_mic",
+                "source_audio_sha256": STUB_SHA256,
                 "pair_id": "pair-1",
                 "derived_from": "mic1/pair-1__mic1-roast.wav",
+                "boundary_time_axis": "target_stream_axis",
                 "derivation_method": "copy_timestamps_for_audit_only",
                 "alignment_uncertainty_seconds": 1.0,
                 "training_policy": "exclude_windows_intersecting_boundary_guard_band",

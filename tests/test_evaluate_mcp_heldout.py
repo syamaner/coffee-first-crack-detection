@@ -182,6 +182,7 @@ def _discovery_fixture(tmp_path: Path) -> dict[str, Any]:
             provenance.update(
                 {
                     "derived_from": "mic1/fresh__mic1-fresh.wav",
+                    "boundary_time_axis": "mic1_session_axis",
                     "derivation_method": "verified_audio_alignment",
                     "alignment": "independent_clocks_not_sample_locked",
                     "alignment_uncertainty_seconds": 0.1,
@@ -231,6 +232,10 @@ def test_discovers_fresh_pair_with_authoritative_t0(tmp_path: Path) -> None:
     assert [recording.mic_num for recording in recordings] == [1, 2]
     assert {recording.pair_id for recording in recordings} == {"fresh"}
     assert [recording.t0_offset_sec for recording in recordings] == [2.5, 2.25]
+    assert [recording.region.start_sec for recording in recordings if recording.region] == [
+        7.0,
+        6.75,
+    ]
     assert [recording.stream_start_offset_seconds_relative_to_mic1 for recording in recordings] == [
         0.0,
         0.25,
@@ -645,7 +650,7 @@ def test_rejects_source_path_outside_manifest_root(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("region", "detected_sec", "expected"),
+    ("region", "notification_sec", "expected"),
     [
         (None, None, "true_negative"),
         (None, 5.0, "false_positive"),
@@ -660,20 +665,17 @@ def test_rejects_source_path_outside_manifest_root(tmp_path: Path) -> None:
             10.0,
             "premature_false_alert",
         ),
-        (replay.FirstCrackRegion(20.0, 30.0, 0.0, "human"), 12.0, "detected"),
+        (replay.FirstCrackRegion(20.0, 30.0, 0.0, "human"), 20.0, "detected"),
         (replay.FirstCrackRegion(20.0, 30.0, 0.0, "human"), 30.0, "late_outside_region"),
     ],
 )
 def test_classify_outcome(
     region: replay.FirstCrackRegion | None,
-    detected_sec: float | None,
+    notification_sec: float | None,
     expected: str,
 ) -> None:
-    """Recording outcomes distinguish misses and premature alerts."""
-    assert (
-        replay.classify_outcome(region=region, detected_sec=detected_sec, window_seconds=10.0)
-        == expected
-    )
+    """Operational notification time distinguishes misses and premature alerts."""
+    assert replay.classify_outcome(region=region, notification_sec=notification_sec) == expected
 
 
 def test_frozen_protocol_cannot_change_after_creation(tmp_path: Path) -> None:
@@ -734,6 +736,7 @@ def test_evaluate_reverifies_model_bundle_around_backend_and_replay(
             "chunk_manifest",
             "dataset_capture_manifest",
             "holdout_capture_manifest",
+            "training_provenance",
         )
     }
     for path in evidence_paths.values():
@@ -777,6 +780,11 @@ def test_evaluate_reverifies_model_bundle_around_backend_and_replay(
     monkeypatch.setattr(replay, "_load_mcp", lambda _path: mcp)
     monkeypatch.setattr(replay, "discover_heldout_recordings", lambda **_kwargs: [recording])
     monkeypatch.setattr(replay, "_resolved_artifacts", lambda *_args, **_kwargs: artifacts)
+    monkeypatch.setattr(
+        replay,
+        "validate_onnx_training_provenance",
+        lambda **_kwargs: {"experiment_name": "test-experiment"},
+    )
     monkeypatch.setattr(
         replay,
         "_prepare_audio",

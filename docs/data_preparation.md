@@ -291,10 +291,12 @@ timestamps are not represented as exact mic2 ground truth. Each mic2 JSON record
 
 Because final-duration difference cannot bound independent start delay or drift,
 the chunker excludes **every historical derived mic2 window**. The copied
-timestamps remain deterministic, paired, and auditable, but they are not
-training ground truth. A future annotation may use a finite guard band only when
-its provenance names a verified audio-alignment or recorded-stream-timestamp
-method. Every exclusion is written to `chunk_manifest.jsonl`. Missing human
+timestamps remain deterministic, paired, and auditable on the
+`mic1_session_axis`, but they are not mic2 training ground truth. A future
+annotation may use a finite guard band only when its boundaries have been
+shifted onto the `target_stream_axis` and its provenance names a verified
+audio-alignment or recorded-stream-timestamp method. Every exclusion is written
+to `chunk_manifest.jsonl`. Missing human
 annotations, missing targets, ambiguous identities, malformed paired-mic
 provenance, and pre-existing derived outputs fail instead of being silently
 skipped.
@@ -390,6 +392,14 @@ recordings fail closed. Each mic1 label must retain human Label Studio
 provenance and exact stream identity; each mic2 label must match its stream and
 retain the derived independent-clock uncertainty provenance.
 
+The candidate must also have been trained and exported through the provenance-aware
+pipeline below. Immediately before training, `rebuild_and_train.sh` writes an
+immutable `training_data_provenance.json` containing the exact split-integrity,
+chunk-manifest, and dataset-capture-manifest hashes. ONNX export binds the local
+checkpoint and exported bytes to that snapshot. The held-out evaluator rejects
+an ONNX model whose bound hashes differ from the audited development evidence.
+This prevents a different model or split from being substituted at replay time.
+
 The 16 Aug corpus does **not** contain a valid fresh holdout. Of 38 captured
 sessions, 34 are represented in the dataset splits. The remaining four are
 5.9–7.25 s aborted/fault captures with no `beans_added` milestone, so they are
@@ -427,7 +437,9 @@ Then run:
 ```bash
 venv/bin/python scripts/evaluate_mcp_heldout.py \
   --mcp-src /Users/sertanyamaner/git/coffee-roaster-mcp/src \
-  --onnx-dir exports/onnx-baseline-v7-mic1-safe/int8 \
+  --onnx-dir exports/onnx-baseline-v8-provenance-aware/int8 \
+  --training-provenance \
+    exports/onnx-baseline-v8-provenance-aware/int8/training_provenance.json \
   --dataset-capture-manifest data/raw/mcp-captures/capture_manifest.json \
   --holdout-capture-manifest data/holdout/mcp-captures/capture_manifest.json \
   --labels-dir data/holdout/labels \
@@ -439,14 +451,15 @@ venv/bin/python scripts/evaluate_mcp_heldout.py \
   --pair-id <fresh-session-uuid-6> \
   --threads 8 --window-seconds 10 --overlap 0.7 \
   --threshold 0.6 --min-positive-windows 5 --confirmation-window 20 \
-  --output results/baseline_v7_mic1_safe_fresh_mcp_holdout.json
+  --output results/baseline_v8_provenance_aware_fresh_mcp_holdout.json
 ```
 
 Before the first model call, the command writes a sibling
 `*.protocol.json` lock containing the model/preprocessor hashes, frozen profile,
 pair IDs, WAV/label hashes, T0/drop offsets, mic roles, and hashes for the split,
 chunk, dataset-capture and holdout manifests, selected label JSON, and authoritative
-recording sidecars used to prove non-exposure and timing. Those evidence files
+recording sidecars used to prove non-exposure and timing. It also records the
+bound training-provenance hash and experiment name. Those evidence files
 are reverified after replay. The
 recording sidecar's session and two stream identities must match the selected
 pair. The evaluator hashes itself, copies each checksum-verified WAV into its
@@ -464,6 +477,12 @@ Per roast and per mic, the report preserves:
 If the frozen candidate needs tuning after this replay, those recordings become
 development evidence. Do not tune on them and continue calling them a final
 holdout; reserve newly captured sessions for the next decisive evaluation.
+
+Outcome classification uses the operational notification timestamp, not the
+backdated event timestamp. The latter is retained only for first-qualifying-window
+timing error. For mic2, copied mic1-session-axis label boundaries are shifted by
+the authoritative per-stream start offset before comparison with WAV-relative
+notification times.
 
 ---
 
@@ -532,22 +551,24 @@ training, evaluation, and ONNX comparison with:
 
 ```bash
 source venv/bin/activate
-./scripts/rebuild_and_train.sh baseline_v7_mic1_safe
+./scripts/rebuild_and_train.sh baseline_v8_provenance_aware
 
 python -m coffee_first_crack.export_onnx \
-  --model-dir experiments/baseline_v7_mic1_safe/checkpoint-best \
-  --output-dir exports/onnx-baseline-v7-mic1-safe --quantize
+  --model-dir experiments/baseline_v8_provenance_aware/checkpoint-best \
+  --output-dir exports/onnx-baseline-v8-provenance-aware --quantize \
+  --training-data-provenance \
+    experiments/baseline_v8_provenance_aware/training_data_provenance.json
 
 python scripts/evaluate_onnx.py \
-  --onnx-dir exports/onnx-baseline-v7-mic1-safe/fp32 \
+  --onnx-dir exports/onnx-baseline-v8-provenance-aware/fp32 \
   --test-dir data/splits/test \
-  --output results/baseline_v7_mic1_safe_fp32_eval.json \
+  --output results/baseline_v8_provenance_aware_fp32_eval.json \
   --threads 8
 
 python scripts/evaluate_onnx.py \
-  --onnx-dir exports/onnx-baseline-v7-mic1-safe/int8 \
+  --onnx-dir exports/onnx-baseline-v8-provenance-aware/int8 \
   --test-dir data/splits/test \
-  --output results/baseline_v7_mic1_safe_int8_eval.json \
+  --output results/baseline_v8_provenance_aware_int8_eval.json \
   --threads 8
 ```
 
@@ -557,4 +578,8 @@ FC recall for PyTorch and FP32 ONNX. INT8 measured 96.56% accuracy / 0.8598 F1 /
 production setting of eight threads. These are pair-safe chunk metrics, not a
 fresh full-roast deployment result. Do not publish the candidate or replace
 production ONNX artifacts until the frozen holdout protocol above is completed
-and reviewed.
+and reviewed. Because `baseline_v7_mic1_safe` was trained before immutable
+pre-training snapshots were introduced, it cannot honestly be retroactively
+bound to one and is not eligible for the decisive fresh-holdout replay. Its
+pair-safe chunk metrics remain valid development evidence. Train the next
+candidate with the commands above before evaluating the reserved cohort.

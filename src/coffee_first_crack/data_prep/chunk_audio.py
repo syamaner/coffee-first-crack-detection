@@ -343,12 +343,14 @@ def process_recording(
     exclude_all_derived = False
     annotation_source = provenance_data.get("annotation_source")
     if annotation_source == "human_label_studio":
+        expected_source_sha256 = provenance_data.get("source_audio_sha256")
         if (
             resolved_mic_num != 1
             or ann.get("mic_num") != 1
             or ann.get("pair_id") != resolved_pair_id
             or provenance_data.get("pair_id") != resolved_pair_id
             or not Path(audio_file).name.startswith(f"{resolved_pair_id}__mic1-")
+            or expected_source_sha256 != source_audio_sha256
         ):
             raise ValueError(
                 f"Human MCP annotation pair or stream identity mismatch: {annotation_path}"
@@ -356,6 +358,7 @@ def process_recording(
     elif annotation_source == "derived_from_paired_mic":
         derived = True
         derived_from = provenance_data.get("derived_from")
+        expected_source_sha256 = provenance_data.get("source_audio_sha256")
         expected_target_prefix = f"{resolved_pair_id}__mic2-"
         expected_source_prefix = f"{resolved_pair_id}__mic1-"
         if (
@@ -366,6 +369,7 @@ def process_recording(
             or not isinstance(derived_from, str)
             or not Path(derived_from).name.startswith(expected_source_prefix)
             or not Path(audio_file).name.startswith(expected_target_prefix)
+            or expected_source_sha256 != source_audio_sha256
         ):
             raise ValueError(
                 f"Derived annotation pair or stream identity mismatch: {annotation_path}"
@@ -373,7 +377,8 @@ def process_recording(
         training_policy = provenance_data.get("training_policy")
         if training_policy == "exclude_all_derived_mic2_without_verified_alignment":
             if (
-                provenance_data.get("alignment_uncertainty_seconds") is not None
+                provenance_data.get("boundary_time_axis") != "mic1_session_axis"
+                or provenance_data.get("alignment_uncertainty_seconds") is not None
                 or provenance_data.get("alignment_uncertainty_status")
                 != "unbounded_historical_missing_stream_start_offsets"
             ):
@@ -384,7 +389,8 @@ def process_recording(
         elif training_policy == "exclude_windows_intersecting_boundary_guard_band":
             raw_uncertainty = provenance_data.get("alignment_uncertainty_seconds")
             if (
-                not isinstance(raw_uncertainty, (int, float))
+                provenance_data.get("boundary_time_axis") != "target_stream_axis"
+                or not isinstance(raw_uncertainty, (int, float))
                 or isinstance(raw_uncertainty, bool)
                 or not np.isfinite(float(raw_uncertainty))
                 or raw_uncertainty < 0
@@ -400,7 +406,9 @@ def process_recording(
             raise ValueError(
                 f"Derived annotation lacks the required uncertainty policy: {annotation_path}"
             )
-    elif ann.get("pair_id") is not None and ann.get("mic_num") in {1, 2}:
+    elif ann.get("pair_id") is not None or any(
+        marker in Path(audio_file).name for marker in ("__mic1-", "__mic2-")
+    ):
         raise ValueError(f"Paired MCP annotation lacks required provenance: {annotation_path}")
 
     for chunk in chunks:

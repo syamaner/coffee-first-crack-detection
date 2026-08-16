@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import math
 import re
@@ -50,6 +51,15 @@ from coffee_first_crack.data_prep.corpus_manifest import (
 # ---------------------------------------------------------------------------
 # I/O helpers
 # ---------------------------------------------------------------------------
+
+
+def sha256_file(path: Path) -> str:
+    """Return the SHA-256 digest of a staged recording."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -299,9 +309,15 @@ def propagate_manifest(
             raise FileNotFoundError(
                 f"Missing human mic1 annotation for pair {pair_id}: {primary_path}"
             )
+        primary_audio = resolve_within(staging_root, primary["staged_relative_path"])
         target_audio = resolve_within(staging_root, target["staged_relative_path"])
+        if not primary_audio.is_file():
+            raise FileNotFoundError(f"Missing staged mic1 WAV for pair {pair_id}: {primary_audio}")
         if not target_audio.is_file():
             raise FileNotFoundError(f"Missing staged mic2 WAV for pair {pair_id}: {target_audio}")
+        for stream, audio_path in ((primary, primary_audio), (target, target_audio)):
+            if sha256_file(audio_path) != stream["sha256"]:
+                raise ValueError(f"Staged WAV does not match capture manifest: {audio_path}")
         if not target_audio.is_relative_to(resolved_audio_root):
             raise ValueError(
                 f"Staged mic2 WAV is outside the configured audio root: {target_audio}"
@@ -315,6 +331,12 @@ def propagate_manifest(
         primary_annotation = load_json(primary_path)
         if primary_annotation.get("pair_id") != pair_id or primary_annotation.get("mic_num") != 1:
             raise ValueError(f"Human annotation pair identity mismatch: {primary_path}")
+        primary_provenance = primary_annotation.get("provenance")
+        if (
+            not isinstance(primary_provenance, dict)
+            or primary_provenance.get("source_audio_sha256") != primary["sha256"]
+        ):
+            raise ValueError(f"Human annotation source checksum mismatch: {primary_path}")
         annotations = primary_annotation.get("annotations")
         if not isinstance(annotations, list):
             raise ValueError(f"Human annotation has invalid annotations list: {primary_path}")
@@ -354,6 +376,7 @@ def propagate_manifest(
                 "pair_id": pair_id,
                 "derived_from": primary["staged_relative_path"],
                 "derivation_method": "copy_timestamps_for_audit_only",
+                "boundary_time_axis": "mic1_session_axis",
                 "alignment": "independent_clocks_not_sample_locked",
                 "observed_pair_duration_delta_seconds": session["observed_duration_delta_seconds"],
                 "alignment_uncertainty_seconds": None,
@@ -363,6 +386,7 @@ def propagate_manifest(
                 "uncertainty_basis": "duration_delta_is_diagnostic_not_an_alignment_bound",
                 "training_policy": "exclude_all_derived_mic2_without_verified_alignment",
                 "exact_stream_start_offsets_available": False,
+                "source_audio_sha256": target["sha256"],
             },
         }
         plans.append((target_path, primary_path, derived))

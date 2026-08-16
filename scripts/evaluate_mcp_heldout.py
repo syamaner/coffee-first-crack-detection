@@ -32,6 +32,8 @@ from typing import Any, Protocol, cast
 import librosa
 import soundfile as sf
 
+from coffee_first_crack.training_provenance import validate_onnx_training_provenance
+
 SAMPLE_RATE = 16_000
 
 
@@ -315,7 +317,10 @@ def _resolve_source_file(source_root: Path, value: object, *, field: str) -> Pat
 
 
 def _parse_region(
-    label: dict[str, Any], label_path: Path, duration_sec: float
+    label: dict[str, Any],
+    label_path: Path,
+    duration_sec: float,
+    stream_start_offset_seconds_relative_to_mic1: float = 0.0,
 ) -> FirstCrackRegion | None:
     """Parse the optional single first-crack region and its provenance."""
     annotations = label.get("annotations")
@@ -332,11 +337,15 @@ def _parse_region(
         return None
     region = regions[0]
     try:
-        start_sec = float(region["start_time"])
-        end_sec = float(region["end_time"])
+        source_start_sec = float(region["start_time"])
+        source_end_sec = float(region["end_time"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"Malformed first-crack region in {label_path}") from exc
-    if not math.isfinite(start_sec) or not math.isfinite(end_sec) or start_sec < 0:
+    if not math.isfinite(source_start_sec) or not math.isfinite(source_end_sec):
+        raise ValueError(f"Invalid first-crack region in {label_path}")
+    start_sec = source_start_sec - stream_start_offset_seconds_relative_to_mic1
+    end_sec = source_end_sec - stream_start_offset_seconds_relative_to_mic1
+    if start_sec < 0:
         raise ValueError(f"Invalid first-crack region in {label_path}")
     if end_sec <= start_sec:
         raise ValueError(f"first-crack end must be after start in {label_path}")
@@ -402,6 +411,7 @@ def _validate_label_identity(
     if (
         provenance.get("annotation_source") != "derived_from_paired_mic"
         or provenance.get("derived_from") != primary_stream["staged_relative_path"]
+        or provenance.get("boundary_time_axis") != "mic1_session_axis"
         or method not in {"verified_audio_alignment", "recorded_stream_timestamp_alignment"}
         or provenance.get("alignment") != "independent_clocks_not_sample_locked"
         or (method == "verified_audio_alignment" and exact_offsets is not False)
@@ -616,7 +626,12 @@ def discover_heldout_recordings(
                         f"Holdout pair {pair_id!r} milestones adjusted for mic"
                         f"{stream['mic_num']} start offset fall outside its stream"
                     )
-                region = _parse_region(label, label_path, duration_sec)
+                region = _parse_region(
+                    label,
+                    label_path,
+                    duration_sec,
+                    stream_start_offset_seconds_relative_to_mic1=stream_start_offset,
+                )
                 if _sha256(label_path) != label_sha256:
                     raise ValueError(f"Holdout label changed during discovery: {label_path}")
                 recordings.append(
@@ -668,18 +683,17 @@ def discover_heldout_recordings(
 def classify_outcome(
     *,
     region: FirstCrackRegion | None,
-    detected_sec: float | None,
-    window_seconds: float,
+    notification_sec: float | None,
 ) -> str:
-    """Classify recording-level detection without hiding premature alerts."""
+    """Classify operational notification timeliness without hiding false alerts."""
     if region is None:
-        return "true_negative" if detected_sec is None else "false_positive"
-    if detected_sec is None:
+        return "true_negative" if notification_sec is None else "false_positive"
+    if notification_sec is None:
         return "missed"
     uncertainty = region.alignment_uncertainty_sec
-    if detected_sec + window_seconds <= region.start_sec - uncertainty:
+    if notification_sec < region.start_sec - uncertainty:
         return "premature_false_alert"
-    if detected_sec >= region.end_sec + uncertainty:
+    if notification_sec >= region.end_sec + uncertainty:
         return "late_outside_region"
     return "detected"
 
@@ -928,8 +942,7 @@ def _evaluate_recording(
         "confirming_inference_latency_ms": confirming_inference_latency_ms,
         "outcome": classify_outcome(
             region=region,
-            detected_sec=detected_sec,
-            window_seconds=window_seconds,
+            notification_sec=notification_sec,
         ),
         "wall_seconds": time.monotonic() - started_at,
     }
@@ -1095,6 +1108,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "chunk_manifest": args.chunk_manifest,
         "dataset_capture_manifest": args.dataset_capture_manifest,
         "holdout_capture_manifest": args.holdout_capture_manifest,
+        "training_provenance": args.training_provenance,
     }
     base_evidence_snapshot = _snapshot_inputs(base_evidence_paths)
     mcp_root = args.mcp_src.resolve().parent
@@ -1135,6 +1149,15 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "preprocessor_config": preprocessor_path,
     }
     artifact_snapshot = _snapshot_inputs(artifact_paths)
+    training_provenance = validate_onnx_training_provenance(
+        provenance_path=args.training_provenance,
+        onnx_sha256=artifact_snapshot["onnx_model"]["sha256"],
+        preprocessor_sha256=artifact_snapshot["preprocessor_config"]["sha256"],
+        dataset_evidence_sha256={
+            name: base_evidence_snapshot[name]["sha256"]
+            for name in ("split_integrity", "chunk_manifest", "dataset_capture_manifest")
+        },
+    )
     hop_seconds = args.window_seconds * (1.0 - args.overlap)
     protocol = {
         "schema_version": 1,
@@ -1147,6 +1170,8 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "precision": "int8",
             "onnx_sha256": artifact_snapshot["onnx_model"]["sha256"],
             "preprocessor_sha256": artifact_snapshot["preprocessor_config"]["sha256"],
+            "training_provenance_sha256": base_evidence_snapshot["training_provenance"]["sha256"],
+            "training_experiment": training_provenance.get("experiment_name"),
         },
         "profile": {
             "sample_rate": SAMPLE_RATE,
@@ -1263,6 +1288,9 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "onnx_sha256": artifact_snapshot["onnx_model"]["sha256"],
             "preprocessor_path": str(preprocessor_path.resolve()),
             "preprocessor_sha256": artifact_snapshot["preprocessor_config"]["sha256"],
+            "training_provenance_path": str(args.training_provenance.resolve()),
+            "training_provenance_sha256": base_evidence_snapshot["training_provenance"]["sha256"],
+            "training_experiment": training_provenance.get("experiment_name"),
         },
         "profile": {
             "sample_rate": SAMPLE_RATE,
@@ -1291,6 +1319,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mcp-src", type=Path, required=True)
     parser.add_argument("--onnx-dir", type=Path, required=True)
+    parser.add_argument(
+        "--training-provenance",
+        type=Path,
+        required=True,
+        help="Bound training_provenance.json produced by provenance-aware ONNX export",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--repo-id", default="local/baseline-v6-pair-aware")
     parser.add_argument("--revision", default=None)

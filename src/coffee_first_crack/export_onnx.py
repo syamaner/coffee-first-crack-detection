@@ -21,12 +21,14 @@ from pathlib import Path
 import numpy as np
 
 from coffee_first_crack.model import build_feature_extractor
+from coffee_first_crack.training_provenance import bind_onnx_artifact
 
 
 def export_onnx(
     model_dir: str | Path,
     output_dir: str | Path,
     quantize: bool = True,
+    training_data_provenance: Path | None = None,
 ) -> dict[str, Path]:
     """Export a fine-tuned AST model to ONNX.
 
@@ -34,6 +36,9 @@ def export_onnx(
         model_dir: Path to ``save_pretrained`` checkpoint or HuggingFace model ID.
         output_dir: Directory to write ONNX files.
         quantize: If ``True``, also produce an INT8 quantized variant.
+        training_data_provenance: Optional dataset snapshot created immediately
+            before the local training run. When supplied, each ONNX variant is
+            bound to that exact evidence for held-out evaluation.
 
     Returns:
         Dict with keys ``"fp32"`` (and optionally ``"int8"``) mapping to output paths.
@@ -45,6 +50,7 @@ def export_onnx(
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    model_source = model_dir
     model_dir = str(model_dir)
 
     print(f"Exporting model from: {model_dir}")
@@ -100,6 +106,19 @@ def export_onnx(
         "\nFeature extractor config saved to: "
         + ", ".join(str(d) for d in sorted(config_dirs, key=str))
     )
+
+    if training_data_provenance is not None:
+        local_model_dir = Path(model_source)
+        for variant, model_path in results.items():
+            provenance_path = model_path.parent / "training_provenance.json"
+            bind_onnx_artifact(
+                training_data_snapshot=training_data_provenance,
+                model_dir=local_model_dir,
+                onnx_model=model_path,
+                preprocessor_config=model_path.parent / "preprocessor_config.json",
+                output=provenance_path,
+            )
+            print(f"{variant} training provenance saved to: {provenance_path}")
 
     _print_size_summary(results)
     return results
@@ -201,12 +220,21 @@ def main() -> None:
         action="store_true",
         help="Run latency benchmark after export",
     )
+    parser.add_argument(
+        "--training-data-provenance",
+        type=Path,
+        help=(
+            "Pre-training dataset snapshot from rebuild_and_train.sh; required for a "
+            "decisive held-out replay"
+        ),
+    )
     args = parser.parse_args()
 
     results = export_onnx(
         model_dir=args.model_dir,
         output_dir=args.output_dir,
         quantize=args.quantize,
+        training_data_provenance=args.training_data_provenance,
     )
 
     if args.benchmark:
