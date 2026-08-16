@@ -199,6 +199,89 @@ def test_derived_mic2_identity_cannot_cross_pairs(
         )
 
 
+@pytest.mark.parametrize(
+    ("annotation_pair", "provenance_pair", "mic_num", "audio_file"),
+    [
+        ("pair-b", "pair-a", 1, "pair-b__mic1-roast.wav"),
+        ("pair-b", "pair-b", 2, "pair-b__mic1-roast.wav"),
+        ("pair-b", "pair-b", 1, "pair-a__mic1-roast.wav"),
+    ],
+)
+def test_human_mic1_identity_cannot_cross_pairs_or_streams(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    annotation_pair: str,
+    provenance_pair: str,
+    mic_num: int,
+    audio_file: str,
+) -> None:
+    """Human MCP ground truth must remain bound to its UUID-safe mic1 stream."""
+    audio_root = tmp_path / "audio"
+    audio_root.mkdir()
+    (audio_root / audio_file).write_bytes(b"stub")
+    annotation_path = tmp_path / "mic1.json"
+    annotation_path.write_text(
+        json.dumps(
+            {
+                "audio_file": audio_file,
+                "pair_id": annotation_pair,
+                "mic_num": mic_num,
+                "annotations": [],
+                "provenance": {
+                    "annotation_source": "human_label_studio",
+                    "pair_id": provenance_pair,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        chunking.librosa,
+        "load",
+        lambda *_args, **_kwargs: (np.zeros(20 * 100, dtype=np.float32), 100),
+    )
+
+    with pytest.raises(ValueError, match="Human MCP annotation pair or stream identity mismatch"):
+        process_recording(
+            annotation_path,
+            audio_root,
+            tmp_path / "processed",
+            window_size=10.0,
+            sample_rate=100,
+            pair_id="pair-b",
+            mic_num=1,
+        )
+
+
+def test_source_audio_cannot_change_while_decoding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Chunk bytes and manifest source checksum must describe the same source version."""
+    audio_root = tmp_path / "audio"
+    audio_root.mkdir()
+    audio_path = audio_root / "legacy.wav"
+    audio_path.write_bytes(b"before")
+    annotation_path = tmp_path / "legacy.json"
+    annotation_path.write_text(
+        json.dumps({"audio_file": "legacy.wav", "annotations": []}), encoding="utf-8"
+    )
+
+    def mutate_during_load(*_args: object, **_kwargs: object) -> tuple[np.ndarray, int]:
+        audio_path.write_bytes(b"after")
+        return np.zeros(20 * 100, dtype=np.float32), 100
+
+    monkeypatch.setattr(chunking.librosa, "load", mutate_during_load)
+
+    with pytest.raises(RuntimeError, match="Source audio changed while it was being decoded"):
+        process_recording(
+            annotation_path,
+            audio_root,
+            tmp_path / "processed",
+            window_size=10.0,
+            sample_rate=100,
+        )
+
+
 def test_paired_mic2_without_derived_provenance_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -225,7 +308,7 @@ def test_paired_mic2_without_derived_provenance_fails_closed(
         lambda *_args, **_kwargs: (np.zeros(20 * 100, dtype=np.float32), 100),
     )
 
-    with pytest.raises(ValueError, match="Paired mic2 annotation lacks"):
+    with pytest.raises(ValueError, match="Paired MCP annotation lacks"):
         process_recording(
             annotation_path,
             audio_root,

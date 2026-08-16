@@ -51,11 +51,33 @@ def _discovery_fixture(tmp_path: Path) -> dict[str, Any]:
     _write_json(
         split_integrity,
         {
+            "schema_version": 1,
+            "strategy": "pair_id",
+            "integrity_passed": True,
+            "pair_id_intersections": {
+                "train_validation": [],
+                "train_test": [],
+                "validation_test": [],
+            },
+            "physical_session_count": 1,
+            "stream_recording_count": 2,
             "splits": {
-                "train": {"pair_ids": ["used"], "stream_recording_count": 2},
-                "validation": {"pair_ids": [], "stream_recording_count": 0},
-                "test": {"pair_ids": [], "stream_recording_count": 0},
-            }
+                "train": {
+                    "pair_ids": ["used"],
+                    "physical_session_count": 1,
+                    "stream_recording_count": 2,
+                },
+                "validation": {
+                    "pair_ids": [],
+                    "physical_session_count": 0,
+                    "stream_recording_count": 0,
+                },
+                "test": {
+                    "pair_ids": [],
+                    "physical_session_count": 0,
+                    "stream_recording_count": 0,
+                },
+            },
         },
     )
     chunk_manifest.write_text(
@@ -164,6 +186,7 @@ def _discovery_fixture(tmp_path: Path) -> dict[str, Any]:
                     "alignment": "independent_clocks_not_sample_locked",
                     "alignment_uncertainty_seconds": 0.1,
                     "exact_stream_start_offsets_available": False,
+                    "stream_start_offset_seconds_relative_to_mic1": 0.25,
                 }
             )
         _write_json(
@@ -207,7 +230,11 @@ def test_discovers_fresh_pair_with_authoritative_t0(tmp_path: Path) -> None:
     assert len(recordings) == 2
     assert [recording.mic_num for recording in recordings] == [1, 2]
     assert {recording.pair_id for recording in recordings} == {"fresh"}
-    assert {recording.t0_offset_sec for recording in recordings} == {2.5}
+    assert [recording.t0_offset_sec for recording in recordings] == [2.5, 2.25]
+    assert [recording.stream_start_offset_seconds_relative_to_mic1 for recording in recordings] == [
+        0.0,
+        0.25,
+    ]
     assert all(recording.region is not None for recording in recordings)
 
 
@@ -216,7 +243,10 @@ def test_rejects_pair_already_present_in_split(tmp_path: Path) -> None:
     fixture = _discovery_fixture(tmp_path)
     split = json.loads(fixture["split_integrity_path"].read_text())
     split["splits"]["train"]["pair_ids"].append("fresh")
+    split["splits"]["train"]["physical_session_count"] = 2
     split["splits"]["train"]["stream_recording_count"] = 4
+    split["physical_session_count"] = 2
+    split["stream_recording_count"] = 4
     _write_json(fixture["split_integrity_path"], split)
     with fixture["chunk_manifest_path"].open("a", encoding="utf-8") as handle:
         handle.write(
@@ -241,6 +271,40 @@ def test_rejects_pair_already_present_in_split(tmp_path: Path) -> None:
         handle.write("\n")
 
     with pytest.raises(ValueError, match="already appears in a dataset split"):
+        replay.discover_heldout_recordings(**fixture)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_test",
+        "failed_integrity",
+        "nonempty_intersection",
+        "malformed_partition",
+        "undeclared_overlap",
+        "bad_top_count",
+    ],
+)
+def test_rejects_incomplete_or_failed_split_integrity(tmp_path: Path, mutation: str) -> None:
+    """Holdout exposure evidence must contain all three clean partitions."""
+    fixture = _discovery_fixture(tmp_path)
+    split = json.loads(fixture["split_integrity_path"].read_text())
+    if mutation == "missing_test":
+        del split["splits"]["test"]
+    elif mutation == "failed_integrity":
+        split["integrity_passed"] = False
+    elif mutation == "nonempty_intersection":
+        split["pair_id_intersections"]["train_test"] = ["used"]
+    elif mutation == "malformed_partition":
+        split["splits"]["train"]["physical_session_count"] = 2
+    elif mutation == "undeclared_overlap":
+        split["splits"]["test"]["pair_ids"] = ["used"]
+        split["splits"]["test"]["physical_session_count"] = 1
+    else:
+        split["physical_session_count"] = 2
+    _write_json(fixture["split_integrity_path"], split)
+
+    with pytest.raises(ValueError, match="Malformed split integrity report"):
         replay.discover_heldout_recordings(**fixture)
 
 
@@ -352,6 +416,27 @@ def test_rejects_recording_sidecar_with_wrong_stream(tmp_path: Path) -> None:
         replay.discover_heldout_recordings(**fixture)
 
 
+def test_rejects_recording_sidecar_changed_during_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Loaded timing milestones and their digest must identify the same sidecar bytes."""
+    fixture = _discovery_fixture(tmp_path)
+    holdout = json.loads(fixture["holdout_capture_manifest_path"].read_text())
+    sidecar_path = Path(holdout["sessions"][0]["recording_sidecar_source_path"])
+    read_json = replay._read_json
+
+    def mutate_after_read(path: Path) -> dict[str, Any]:
+        value = read_json(path)
+        if path == sidecar_path:
+            sidecar_path.write_text('{"changed": true}', encoding="utf-8")
+        return value
+
+    monkeypatch.setattr(replay, "_read_json", mutate_after_read)
+
+    with pytest.raises(ValueError, match="sidecar changed during discovery"):
+        replay.discover_heldout_recordings(**fixture)
+
+
 def test_rejects_missing_drop_milestone(tmp_path: Path) -> None:
     """A holdout must prove that each capture covers the complete roast."""
     fixture = _discovery_fixture(tmp_path)
@@ -374,7 +459,7 @@ def test_rejects_drop_after_stream_end(tmp_path: Path) -> None:
     sidecar_data["milestones"] = {"beans_added": 2.5, "drop": 11.0}
     _write_json(sidecar, sidecar_data)
 
-    with pytest.raises(ValueError, match="drop milestone .* exceeds mic1 duration"):
+    with pytest.raises(ValueError, match="milestones adjusted for mic1 start offset"):
         replay.discover_heldout_recordings(**fixture)
 
 
@@ -445,6 +530,18 @@ def test_rejects_mic2_without_derived_uncertainty_provenance(tmp_path: Path) -> 
         replay.discover_heldout_recordings(**fixture)
 
 
+def test_rejects_mic2_without_stream_start_offset(tmp_path: Path) -> None:
+    """Finite uncertainty alone cannot align session T0 onto the mic2 WAV axis."""
+    fixture = _discovery_fixture(tmp_path)
+    label_path = fixture["label_dirs"][0] / "fresh__mic2-fresh.json"
+    mic2 = json.loads(label_path.read_text(encoding="utf-8"))
+    del mic2["provenance"]["stream_start_offset_seconds_relative_to_mic1"]
+    _write_json(label_path, mic2)
+
+    with pytest.raises(ValueError, match="derived-mic uncertainty provenance"):
+        replay.discover_heldout_recordings(**fixture)
+
+
 def test_rejects_region_beyond_heldout_stream_duration(tmp_path: Path) -> None:
     """An impossible copied mic2 interval cannot become evaluation ground truth."""
     fixture = _discovery_fixture(tmp_path)
@@ -454,6 +551,38 @@ def test_rejects_region_beyond_heldout_stream_duration(tmp_path: Path) -> None:
     _write_json(label_path, mic2)
 
     with pytest.raises(ValueError, match="first-crack region is outside"):
+        replay.discover_heldout_recordings(**fixture)
+
+
+def test_rejects_unsupported_annotation_region(tmp_path: Path) -> None:
+    """A mistyped FC region cannot silently turn a positive roast into a negative."""
+    fixture = _discovery_fixture(tmp_path)
+    label_path = fixture["label_dirs"][0] / "fresh__mic1-fresh.json"
+    mic1 = json.loads(label_path.read_text(encoding="utf-8"))
+    mic1["annotations"][0]["label"] = "first-crak"
+    _write_json(label_path, mic1)
+
+    with pytest.raises(ValueError, match="Unsupported annotation region"):
+        replay.discover_heldout_recordings(**fixture)
+
+
+def test_rejects_label_changed_during_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Parsed ground truth and its digest must identify the same label bytes."""
+    fixture = _discovery_fixture(tmp_path)
+    label_path = fixture["label_dirs"][0] / "fresh__mic1-fresh.json"
+    read_json = replay._read_json
+
+    def mutate_after_read(path: Path) -> dict[str, Any]:
+        value = read_json(path)
+        if path == label_path:
+            label_path.write_text('{"changed": true}', encoding="utf-8")
+        return value
+
+    monkeypatch.setattr(replay, "_read_json", mutate_after_read)
+
+    with pytest.raises(ValueError, match="label changed during discovery"):
         replay.discover_heldout_recordings(**fixture)
 
 
@@ -575,6 +704,25 @@ def test_input_snapshot_rejects_missing_evidence(tmp_path: Path) -> None:
         replay._snapshot_inputs({"missing": tmp_path / "missing.json"})
 
 
+@pytest.mark.parametrize("changed_input", ["sidecar", "label"])
+def test_recording_evidence_snapshot_must_match_discovery(
+    tmp_path: Path, changed_input: str
+) -> None:
+    """Expanded replay evidence cannot silently disagree with discovery digests."""
+    fixture = _discovery_fixture(tmp_path)
+    recordings = replay.discover_heldout_recordings(**fixture)
+    paths = {
+        "recording_sidecar:fresh": recordings[0].recording_sidecar_path,
+        **{f"label:{recording.recording_id}": recording.label_path for recording in recordings},
+    }
+    snapshot = replay._snapshot_inputs(paths)
+    key = "recording_sidecar:fresh" if changed_input == "sidecar" else "label:fresh__mic1-fresh"
+    snapshot[key]["sha256"] = "0" * 64
+
+    with pytest.raises(RuntimeError, match="changed after discovery"):
+        replay._verify_recording_evidence_snapshot(recordings, snapshot)
+
+
 def test_evaluate_reverifies_model_bundle_around_backend_and_replay(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -598,15 +746,21 @@ def test_evaluate_reverifies_model_bundle_around_backend_and_replay(
     audio_path.write_bytes(b"held-out-audio")
     label_path = tmp_path / "label.json"
     label_path.write_text("{}", encoding="utf-8")
+    sidecar_path = tmp_path / "roast.recording.json"
+    sidecar_path.write_text("{}", encoding="utf-8")
     recording = replay.HeldOutRecording(
         pair_id="fresh-pair",
         origin="bean-a",
         recording_id="fresh-pair__mic1",
         audio_path=audio_path,
         label_path=label_path,
+        label_sha256=_sha256(label_path),
         mic_num=1,
         mic_label="primary",
         source_sha256=_sha256(audio_path),
+        recording_sidecar_path=sidecar_path,
+        recording_sidecar_sha256=_sha256(sidecar_path),
+        stream_start_offset_seconds_relative_to_mic1=0.0,
         t0_offset_sec=0.0,
         drop_offset_sec=10.0,
         region=None,
@@ -672,6 +826,12 @@ def test_evaluate_reverifies_model_bundle_around_backend_and_replay(
     assert artifact_verifications == 3
     assert report["model"]["onnx_sha256"] == _sha256(model_path)
     assert report["model"]["preprocessor_sha256"] == _sha256(preprocessor_path)
+    sidecar_evidence = report["test_set"]["dataset_exposure_evidence"][
+        "recording_sidecar:fresh-pair"
+    ]
+    assert sidecar_evidence["sha256"] == _sha256(sidecar_path)
+    label_evidence = report["test_set"]["dataset_exposure_evidence"]["label:fresh-pair__mic1"]
+    assert label_evidence["sha256"] == _sha256(label_path)
 
 
 def test_audio_snapshot_remains_frozen_when_source_changes(tmp_path: Path) -> None:
@@ -781,9 +941,13 @@ def test_replay_counts_all_events_and_preserves_first_notification(tmp_path: Pat
         recording_id="pair__mic1",
         audio_path=tmp_path / "audio.wav",
         label_path=tmp_path / "label.json",
+        label_sha256="c" * 64,
         mic_num=1,
         mic_label="primary",
         source_sha256="a" * 64,
+        recording_sidecar_path=tmp_path / "roast.recording.json",
+        recording_sidecar_sha256="b" * 64,
+        stream_start_offset_seconds_relative_to_mic1=0.0,
         t0_offset_sec=0.0,
         drop_offset_sec=20.0,
         region=replay.FirstCrackRegion(0.0, 10.0, 0.0, "human"),

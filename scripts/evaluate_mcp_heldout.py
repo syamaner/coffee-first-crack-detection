@@ -54,9 +54,13 @@ class HeldOutRecording:
     recording_id: str
     audio_path: Path
     label_path: Path
+    label_sha256: str
     mic_num: int | None
     mic_label: str | None
     source_sha256: str
+    recording_sidecar_path: Path
+    recording_sidecar_sha256: str
+    stream_start_offset_seconds_relative_to_mic1: float
     t0_offset_sec: float
     drop_offset_sec: float
     region: FirstCrackRegion | None
@@ -100,6 +104,21 @@ def _verify_input_snapshot(paths: dict[str, Path], expected: dict[str, dict[str,
     current = _snapshot_inputs(paths)
     if current != expected:
         raise RuntimeError("Replay evidence inputs changed after the protocol was frozen")
+
+
+def _verify_recording_evidence_snapshot(
+    recordings: list[HeldOutRecording], evidence_snapshot: dict[str, dict[str, str]]
+) -> None:
+    """Bind discovered label and timing inputs to the expanded frozen snapshot."""
+    for recording in recordings:
+        sidecar_key = f"recording_sidecar:{recording.pair_id}"
+        if evidence_snapshot[sidecar_key]["sha256"] != recording.recording_sidecar_sha256:
+            raise RuntimeError(
+                f"Recording sidecar changed after discovery: {recording.recording_sidecar_path}"
+            )
+        label_key = f"label:{recording.recording_id}"
+        if evidence_snapshot[label_key]["sha256"] != recording.label_sha256:
+            raise RuntimeError(f"Holdout label changed after discovery: {recording.label_path}")
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -148,10 +167,66 @@ def _split_recording_ids(
     integrity = _read_json(split_integrity_path)
     try:
         splits = integrity["splits"]
-        split_pair_ids = {
-            str(pair_id) for split in splits.values() for pair_id in split["pair_ids"]
+        required_splits = {"train", "validation", "test"}
+        required_intersections = {"train_validation", "train_test", "validation_test"}
+        intersections = integrity["pair_id_intersections"]
+        schema_version = integrity.get("schema_version")
+        if (
+            not isinstance(schema_version, int)
+            or isinstance(schema_version, bool)
+            or schema_version != 1
+            or integrity.get("strategy") != "pair_id"
+            or integrity.get("integrity_passed") is not True
+            or not isinstance(splits, dict)
+            or set(splits) != required_splits
+            or not isinstance(intersections, dict)
+            or set(intersections) != required_intersections
+            or any(intersections[name] != [] for name in required_intersections)
+        ):
+            raise ValueError("Incomplete or failed split-integrity schema")
+        pair_ids_by_split: dict[str, set[str]] = {}
+        expected_streams = 0
+        for split_name in sorted(required_splits):
+            split = splits[split_name]
+            raw_pair_ids = split["pair_ids"]
+            stream_count = split["stream_recording_count"]
+            physical_count = split["physical_session_count"]
+            if (
+                not isinstance(raw_pair_ids, list)
+                or any(
+                    not isinstance(pair_id, str) or not pair_id or pair_id != pair_id.strip()
+                    for pair_id in raw_pair_ids
+                )
+                or len(set(raw_pair_ids)) != len(raw_pair_ids)
+                or not isinstance(stream_count, int)
+                or isinstance(stream_count, bool)
+                or stream_count < 0
+                or not isinstance(physical_count, int)
+                or isinstance(physical_count, bool)
+                or physical_count != len(raw_pair_ids)
+            ):
+                raise ValueError(f"Malformed {split_name} split summary")
+            pair_ids_by_split[split_name] = set(raw_pair_ids)
+            expected_streams += stream_count
+        computed_intersections = {
+            "train_validation": pair_ids_by_split["train"] & pair_ids_by_split["validation"],
+            "train_test": pair_ids_by_split["train"] & pair_ids_by_split["test"],
+            "validation_test": pair_ids_by_split["validation"] & pair_ids_by_split["test"],
         }
-        expected_streams = sum(int(split["stream_recording_count"]) for split in splits.values())
+        if any(computed_intersections.values()):
+            raise ValueError("Split-integrity pair intersections are not empty")
+        split_pair_ids = set().union(*pair_ids_by_split.values())
+        top_physical_count = integrity.get("physical_session_count")
+        top_stream_count = integrity.get("stream_recording_count")
+        if (
+            not isinstance(top_physical_count, int)
+            or isinstance(top_physical_count, bool)
+            or not isinstance(top_stream_count, int)
+            or isinstance(top_stream_count, bool)
+            or top_physical_count != len(split_pair_ids)
+            or top_stream_count != expected_streams
+        ):
+            raise ValueError("Split-integrity top-level counts do not match partitions")
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"Malformed split integrity report {split_integrity_path}") from exc
 
@@ -246,7 +321,11 @@ def _parse_region(
     annotations = label.get("annotations")
     if not isinstance(annotations, list):
         raise ValueError(f"annotations must be a list in {label_path}")
-    regions = [item for item in annotations if item.get("label") == "first_crack"]
+    if any(
+        not isinstance(item, dict) or item.get("label") != "first_crack" for item in annotations
+    ):
+        raise ValueError(f"Unsupported annotation region in {label_path}")
+    regions = annotations
     if len(regions) > 1:
         raise ValueError(f"Expected at most one first-crack region in {label_path}")
     if not regions:
@@ -286,7 +365,7 @@ def _validate_label_identity(
     session: dict[str, Any],
     stream: dict[str, Any],
     primary_stream: dict[str, Any],
-) -> None:
+) -> float:
     """Prove a holdout annotation belongs to the expected paired stream."""
     mic_num = int(stream["mic_num"])
     audio_file = label.get("audio_file")
@@ -314,24 +393,31 @@ def _validate_label_identity(
             raise ValueError(
                 f"Holdout mic1 label is not human Label Studio ground truth: {label_path}"
             )
-        return
+        return 0.0
 
     uncertainty = provenance.get("alignment_uncertainty_seconds")
+    method = provenance.get("derivation_method")
+    exact_offsets = provenance.get("exact_stream_start_offsets_available")
+    start_offset = provenance.get("stream_start_offset_seconds_relative_to_mic1")
     if (
         provenance.get("annotation_source") != "derived_from_paired_mic"
         or provenance.get("derived_from") != primary_stream["staged_relative_path"]
-        or provenance.get("derivation_method")
-        not in {"verified_audio_alignment", "recorded_stream_timestamp_alignment"}
+        or method not in {"verified_audio_alignment", "recorded_stream_timestamp_alignment"}
         or provenance.get("alignment") != "independent_clocks_not_sample_locked"
-        or provenance.get("exact_stream_start_offsets_available") is not False
+        or (method == "verified_audio_alignment" and exact_offsets is not False)
+        or (method == "recorded_stream_timestamp_alignment" and exact_offsets is not True)
         or not isinstance(uncertainty, (int, float))
         or isinstance(uncertainty, bool)
         or not math.isfinite(float(uncertainty))
         or uncertainty < 0
+        or not isinstance(start_offset, (int, float))
+        or isinstance(start_offset, bool)
+        or not math.isfinite(float(start_offset))
     ):
         raise ValueError(
             f"Holdout mic2 label lacks valid derived-mic uncertainty provenance: {label_path}"
         )
+    return float(start_offset)
 
 
 def _validate_recording_sidecar(
@@ -465,6 +551,7 @@ def discover_heldout_recordings(
                 session["recording_sidecar_source_path"],
                 field="recording_sidecar_source_path",
             )
+            sidecar_sha256 = _sha256(sidecar_path)
             sidecar = _read_json(sidecar_path)
             _validate_recording_sidecar(
                 sidecar,
@@ -472,6 +559,8 @@ def discover_heldout_recordings(
                 pair_id=pair_id,
                 streams=streams,
             )
+            if _sha256(sidecar_path) != sidecar_sha256:
+                raise ValueError(f"Recording sidecar changed during discovery: {sidecar_path}")
             milestones = sidecar.get("milestones")
             if (
                 not isinstance(milestones, dict)
@@ -492,11 +581,6 @@ def discover_heldout_recordings(
             primary_stream = next(stream for stream in streams if int(stream["mic_num"]) == 1)
             for stream in streams:
                 duration_sec = float(stream["duration_seconds"])
-                if drop_offset_sec > duration_sec:
-                    raise ValueError(
-                        f"Holdout pair {pair_id!r} drop milestone {drop_offset_sec:.2f}s "
-                        f"exceeds mic{stream['mic_num']} duration {duration_sec:.2f}s"
-                    )
                 source_sha256 = str(stream["sha256"])
                 if source_sha256 in used_hashes:
                     raise ValueError(
@@ -515,8 +599,9 @@ def discover_heldout_recordings(
                 cohort_hashes.add(source_sha256)
                 recording_id = Path(str(stream["staged_relative_path"])).stem
                 label_path = _resolve_label_path(recording_id, label_dirs)
+                label_sha256 = _sha256(label_path)
                 label = _read_json(label_path)
-                _validate_label_identity(
+                stream_start_offset = _validate_label_identity(
                     label=label,
                     label_path=label_path,
                     pair_id=pair_id,
@@ -524,6 +609,16 @@ def discover_heldout_recordings(
                     stream=stream,
                     primary_stream=primary_stream,
                 )
+                stream_t0_offset = t0_offset_sec - stream_start_offset
+                stream_drop_offset = drop_offset_sec - stream_start_offset
+                if stream_t0_offset < 0 or stream_drop_offset > duration_sec:
+                    raise ValueError(
+                        f"Holdout pair {pair_id!r} milestones adjusted for mic"
+                        f"{stream['mic_num']} start offset fall outside its stream"
+                    )
+                region = _parse_region(label, label_path, duration_sec)
+                if _sha256(label_path) != label_sha256:
+                    raise ValueError(f"Holdout label changed during discovery: {label_path}")
                 recordings.append(
                     HeldOutRecording(
                         pair_id=pair_id,
@@ -531,12 +626,16 @@ def discover_heldout_recordings(
                         recording_id=recording_id,
                         audio_path=audio_path,
                         label_path=label_path,
+                        label_sha256=label_sha256,
                         mic_num=int(stream["mic_num"]),
                         mic_label=str(stream["label"]),
                         source_sha256=source_sha256,
-                        t0_offset_sec=t0_offset_sec,
-                        drop_offset_sec=drop_offset_sec,
-                        region=_parse_region(label, label_path, duration_sec),
+                        recording_sidecar_path=sidecar_path,
+                        recording_sidecar_sha256=sidecar_sha256,
+                        stream_start_offset_seconds_relative_to_mic1=stream_start_offset,
+                        t0_offset_sec=stream_t0_offset,
+                        drop_offset_sec=stream_drop_offset,
+                        region=region,
                     )
                 )
     except (KeyError, TypeError, ValueError) as exc:
@@ -802,6 +901,9 @@ def _evaluate_recording(
         "ground_truth": None if region is None else asdict(region),
         "t0_alignment": {
             "source": "roast.recording.json:milestones.beans_added",
+            "stream_start_offset_seconds_relative_to_mic1": (
+                recording.stream_start_offset_seconds_relative_to_mic1
+            ),
             "wav_offset_sec": recording.t0_offset_sec,
             "drop_wav_offset_sec": recording.drop_offset_sec,
             "label_start_sec_after_t0": label_start_after_t0,
@@ -988,13 +1090,13 @@ def _freeze_protocol(path: Path, protocol: dict[str, Any]) -> None:
 
 def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     """Run the complete held-out MCP replay and return its auditable report."""
-    evidence_paths = {
+    base_evidence_paths = {
         "split_integrity": args.split_integrity,
         "chunk_manifest": args.chunk_manifest,
         "dataset_capture_manifest": args.dataset_capture_manifest,
         "holdout_capture_manifest": args.holdout_capture_manifest,
     }
-    evidence_snapshot = _snapshot_inputs(evidence_paths)
+    base_evidence_snapshot = _snapshot_inputs(base_evidence_paths)
     mcp_root = args.mcp_src.resolve().parent
     git_head = _git_head(mcp_root)
     evaluator_path = Path(__file__).resolve()
@@ -1009,7 +1111,17 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         pair_ids=None if args.pair_id is None else set(args.pair_id),
         window_seconds=args.window_seconds,
     )
-    _verify_input_snapshot(evidence_paths, evidence_snapshot)
+    _verify_input_snapshot(base_evidence_paths, base_evidence_snapshot)
+    sidecar_paths = {
+        f"recording_sidecar:{recording.pair_id}": recording.recording_sidecar_path
+        for recording in recordings
+    }
+    label_paths = {
+        f"label:{recording.recording_id}": recording.label_path for recording in recordings
+    }
+    evidence_paths = {**base_evidence_paths, **sidecar_paths, **label_paths}
+    evidence_snapshot = _snapshot_inputs(evidence_paths)
+    _verify_recording_evidence_snapshot(recordings, evidence_snapshot)
     artifacts = _resolved_artifacts(
         mcp,
         onnx_dir=args.onnx_dir,
@@ -1056,7 +1168,11 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 "recording_id": recording.recording_id,
                 "mic_num": recording.mic_num,
                 "audio_sha256": recording.source_sha256,
-                "label_sha256": _sha256(recording.label_path),
+                "label_sha256": recording.label_sha256,
+                "recording_sidecar_sha256": recording.recording_sidecar_sha256,
+                "stream_start_offset_seconds_relative_to_mic1": (
+                    recording.stream_start_offset_seconds_relative_to_mic1
+                ),
                 "t0_offset_sec": recording.t0_offset_sec,
                 "drop_offset_sec": recording.drop_offset_sec,
             }

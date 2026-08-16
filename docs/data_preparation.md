@@ -411,9 +411,12 @@ The authoritative `drop` milestone must also fall within both stream durations.
 Establish FC ground truth afterward by labelling mic1 in Label Studio, ideally
 without viewing model predictions. Mic2 robustness evaluation additionally
 requires verified audio alignment or recorded per-stream timestamps with a
-finite uncertainty; the historical unbounded derivation policy is deliberately
-rejected by the held-out evaluator. Never pass this tree to chunking, splitting,
-training, validation, threshold selection, or model selection.
+finite uncertainty and an explicit
+`stream_start_offset_seconds_relative_to_mic1`. The evaluator subtracts that
+offset from the session-axis T0/drop milestones to place them on each WAV's own
+time axis. The historical unbounded derivation policy is deliberately rejected
+by the held-out evaluator. Never pass this tree to chunking, splitting, training,
+validation, threshold selection, or model selection.
 
 After recording fresh sessions, stage them into a separate local holdout tree,
 label only their UUID-prefixed mic1 files in Label Studio, convert the export,
@@ -442,7 +445,9 @@ venv/bin/python scripts/evaluate_mcp_heldout.py \
 Before the first model call, the command writes a sibling
 `*.protocol.json` lock containing the model/preprocessor hashes, frozen profile,
 pair IDs, WAV/label hashes, T0/drop offsets, mic roles, and hashes for the split,
-chunk, dataset-capture, and holdout manifests used to prove non-exposure. The
+chunk, dataset-capture and holdout manifests, selected label JSON, and authoritative
+recording sidecars used to prove non-exposure and timing. Those evidence files
+are reverified after replay. The
 recording sidecar's session and two stream identities must match the selected
 pair. The evaluator hashes itself, copies each checksum-verified WAV into its
 own temporary snapshot, and replays only that snapshot. The selected MCP
