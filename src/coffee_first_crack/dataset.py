@@ -20,6 +20,11 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+from coffee_first_crack.data_prep.corpus_manifest import (
+    load_capture_manifest,
+    resolve_within,
+)
+
 # ── Filename metadata ────────────────────────────────────────────────────────
 
 # New convention:  {mic}-{origin}-{roast-number}.wav
@@ -263,9 +268,11 @@ def create_dataloaders(
 
 
 def generate_recordings_manifest(raw_dir: Path | str, output_path: Path | str) -> Path:
-    """Auto-generate ``recordings.csv`` by parsing filenames in ``raw_dir``.
+    """Generate ``recordings.csv`` from legacy files and staged MCP manifests.
 
-    Columns: ``filename``, ``microphone``, ``coffee_origin``, ``duration_sec``, ``notes``.
+    MCP rows use their capture-manifest metadata rather than parsing the
+    UUID-prefixed staged filename. Their ``filename`` is relative to
+    ``raw_dir`` so collision-free staged identities remain resolvable.
 
     Args:
         raw_dir: Directory containing raw ``.wav`` files.
@@ -274,28 +281,82 @@ def generate_recordings_manifest(raw_dir: Path | str, output_path: Path | str) -
     Returns:
         Path to the written CSV file.
     """
-    raw_dir = Path(raw_dir)
+    raw_dir = Path(raw_dir).resolve()
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     rows: list[dict[str, str]] = []
+    seen_filenames: set[str] = set()
     for wav_file in sorted(raw_dir.glob("*.wav")):
         meta = parse_filename_metadata(wav_file.stem)
         try:
             duration = librosa.get_duration(path=str(wav_file))
         except Exception:
             duration = 0.0
+        filename = wav_file.name
+        seen_filenames.add(filename)
         rows.append(
             {
-                "filename": wav_file.name,
+                "filename": filename,
                 "microphone": meta["microphone"],
                 "coffee_origin": meta["coffee_origin"],
                 "duration_sec": f"{duration:.2f}",
-                "notes": "",
+                "pair_id": "",
+                "roast_num": "",
+                "mic_num": "",
+                "original_filename": filename,
+                "notes": "legacy_or_single_stream",
             }
         )
 
-    fieldnames = ["filename", "microphone", "coffee_origin", "duration_sec", "notes"]
+    for manifest_path in sorted(raw_dir.rglob("capture_manifest.json")):
+        if manifest_path.is_symlink():
+            raise ValueError(f"Capture manifest may not be a symlink: {manifest_path}")
+        manifest = load_capture_manifest(manifest_path)
+        staging_root = Path(manifest["staging_root"]).resolve()
+        if staging_root != manifest_path.parent.resolve():
+            raise ValueError(
+                f"Capture manifest staging_root does not match its directory: {manifest_path}"
+            )
+        for session in manifest["sessions"]:
+            for stream in session["streams"]:
+                wav_file = resolve_within(staging_root, stream["staged_relative_path"])
+                if not wav_file.is_file() or wav_file.is_symlink():
+                    raise FileNotFoundError(
+                        f"Staged manifest WAV must be a regular non-symlink file: {wav_file}"
+                    )
+                try:
+                    filename = wav_file.relative_to(raw_dir).as_posix()
+                except ValueError as exc:
+                    raise ValueError(f"Staged MCP WAV escapes raw directory: {wav_file}") from exc
+                if filename in seen_filenames:
+                    raise ValueError(f"Duplicate recording filename in catalog: {filename}")
+                seen_filenames.add(filename)
+                rows.append(
+                    {
+                        "filename": filename,
+                        "microphone": stream["label"],
+                        "coffee_origin": session["origin"],
+                        "duration_sec": f"{stream['duration_seconds']:.2f}",
+                        "pair_id": session["pair_id"],
+                        "roast_num": str(session["roast_num"]),
+                        "mic_num": str(stream["mic_num"]),
+                        "original_filename": stream["original_filename"],
+                        "notes": "staged_mcp_capture",
+                    }
+                )
+
+    fieldnames = [
+        "filename",
+        "microphone",
+        "coffee_origin",
+        "duration_sec",
+        "pair_id",
+        "roast_num",
+        "mic_num",
+        "original_filename",
+        "notes",
+    ]
     with output_path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()

@@ -101,6 +101,7 @@ def group_chunks_by_pair(
         )
     groups: dict[str, dict[str, list[Path]]] = defaultdict(lambda: defaultdict(list))
     recordings_by_pair: dict[str, set[str]] = defaultdict(set)
+    pair_by_source_hash: dict[str, str] = {}
     declared_filenames: set[str] = set()
     with chunk_manifest_path.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
@@ -136,6 +137,12 @@ def group_chunks_by_pair(
                 raise ValueError(f"Chunk manifest line {line_number} lacks required identities")
             if label not in _CHUNK_LABELS:
                 raise ValueError(f"Unsupported chunk label at line {line_number}: {label!r}")
+            previous_pair = pair_by_source_hash.setdefault(source_audio_sha256, pair_id)
+            if previous_pair != pair_id:
+                raise ValueError(
+                    "Source checksum is assigned to multiple pair IDs: "
+                    f"{source_audio_sha256} -> {previous_pair!r}, {pair_id!r}"
+                )
             recordings_by_pair[pair_id].add(recording_id)
             if not included:
                 continue

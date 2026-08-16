@@ -175,3 +175,35 @@ class TestMcpCaptureStaging:
 
         with pytest.raises(ValueError, match="Duplicate pair_id"):
             load_capture_manifest(path)
+
+    @pytest.mark.parametrize("field", ["corpus", "session"])
+    def test_non_finite_alignment_uncertainty_is_rejected(self, tmp_path: Path, field: str) -> None:
+        """NaN cannot disable derived-mic boundary guard bands."""
+        capture_root = tmp_path / "captures"
+        _make_session(capture_root, "e" * 32)
+        output = tmp_path / "staged"
+        stage_captures(capture_root, output)
+        raw = json.loads((output / "capture_manifest.json").read_text(encoding="utf-8"))
+        if field == "corpus":
+            raw["max_observed_duration_delta_seconds"] = float("nan")
+        else:
+            raw["sessions"][0]["observed_duration_delta_seconds"] = float("nan")
+        path = tmp_path / "manifest.json"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="alignment uncertainty|duration delta"):
+            load_capture_manifest(path)
+
+    def test_manifest_with_empty_mic_label_is_rejected(self, tmp_path: Path) -> None:
+        """Downstream recording metadata cannot accept a missing device label."""
+        capture_root = tmp_path / "captures"
+        _make_session(capture_root, "c" * 32)
+        output = tmp_path / "staged"
+        stage_captures(capture_root, output)
+        raw = json.loads((output / "capture_manifest.json").read_text(encoding="utf-8"))
+        raw["sessions"][0]["streams"][0]["label"] = ""
+        path = tmp_path / "manifest.json"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="invalid mic label"):
+            load_capture_manifest(path)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path, PurePath
 from typing import Any, TypedDict, cast
@@ -118,7 +119,12 @@ def load_capture_manifest(path: Path) -> CaptureManifest:
     if raw.get("source_files_verified_unchanged") is not True:
         raise ValueError(f"Manifest lacks source-integrity proof: {path}")
     max_delta = raw.get("max_observed_duration_delta_seconds")
-    if not isinstance(max_delta, (int, float)) or isinstance(max_delta, bool) or max_delta < 0:
+    if (
+        not isinstance(max_delta, (int, float))
+        or isinstance(max_delta, bool)
+        or not math.isfinite(float(max_delta))
+        or max_delta < 0
+    ):
         raise ValueError(f"Manifest has invalid alignment uncertainty: {path}")
     sessions = raw.get("sessions")
     if not isinstance(sessions, list):
@@ -146,6 +152,7 @@ def load_capture_manifest(path: Path) -> CaptureManifest:
         if (
             not isinstance(observed_delta, (int, float))
             or isinstance(observed_delta, bool)
+            or not math.isfinite(float(observed_delta))
             or observed_delta < 0
             or observed_delta > max_delta
         ):
@@ -174,6 +181,7 @@ def load_capture_manifest(path: Path) -> CaptureManifest:
             mic_num = stream.get("mic_num")
             duration = stream.get("duration_seconds")
             sample_rate = stream.get("sample_rate")
+            label = stream.get("label")
             original_filename = stream.get("original_filename")
             digest = stream.get("sha256")
             if (
@@ -184,11 +192,14 @@ def load_capture_manifest(path: Path) -> CaptureManifest:
             ):
                 raise ValueError(f"Manifest session {pair_id} has invalid mic identity")
             mic_numbers.add(mic_num)
+            if not isinstance(label, str) or not label:
+                raise ValueError(f"Manifest session {pair_id} has invalid mic label")
             if not relative.startswith(f"mic{mic_num}/"):
                 raise ValueError(f"Manifest stream path disagrees with mic number: {relative}")
             if (
                 not isinstance(duration, (int, float))
                 or isinstance(duration, bool)
+                or not math.isfinite(float(duration))
                 or duration <= 0
                 or not isinstance(sample_rate, int)
                 or isinstance(sample_rate, bool)

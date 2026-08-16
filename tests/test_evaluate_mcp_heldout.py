@@ -102,6 +102,7 @@ def _discovery_fixture(tmp_path: Path) -> dict[str, Any]:
         {
             "mic_num": 1,
             "label": "primary",
+            "original_filename": "mic1-fresh.wav",
             "duration_seconds": 10.6,
             "sha256": mic1_sha,
             "source_path": str(mic1),
@@ -110,6 +111,7 @@ def _discovery_fixture(tmp_path: Path) -> dict[str, Any]:
         {
             "mic_num": 2,
             "label": "paired",
+            "original_filename": "mic2-fresh.wav",
             "duration_seconds": 10.5,
             "sha256": mic2_sha,
             "source_path": str(mic2),
@@ -123,6 +125,8 @@ def _discovery_fixture(tmp_path: Path) -> dict[str, Any]:
             "sessions": [
                 {
                     "pair_id": "fresh",
+                    "origin": "bean-a",
+                    "roast_num": 1,
                     "recording_sidecar_source_path": str(sidecar),
                     "streams": streams,
                 }
@@ -130,11 +134,32 @@ def _discovery_fixture(tmp_path: Path) -> dict[str, Any]:
         },
     )
     for recording_id, mic_num in (("fresh__mic1-fresh", 1), ("fresh__mic2-fresh", 2)):
+        original_filename = f"mic{mic_num}-fresh.wav"
+        provenance: dict[str, Any] = {
+            "annotation_source": (
+                "human_label_studio" if mic_num == 1 else "derived_from_paired_mic"
+            ),
+            "pair_id": "fresh",
+        }
+        if mic_num == 2:
+            provenance.update(
+                {
+                    "derived_from": "mic1/fresh__mic1-fresh.wav",
+                    "alignment": "independent_clocks_not_sample_locked",
+                    "alignment_uncertainty_seconds": 0.1,
+                    "exact_stream_start_offsets_available": False,
+                }
+            )
         _write_json(
             labels_dir / f"{recording_id}.json",
             {
+                "audio_file": f"mcp/mic{mic_num}/{recording_id}.wav",
                 "pair_id": "fresh",
                 "mic_num": mic_num,
+                "origin": "bean-a",
+                "roast_num": 1,
+                "original_filename": original_filename,
+                "provenance": provenance,
                 "annotations": [
                     {
                         "label": "first_crack",
@@ -153,6 +178,7 @@ def _discovery_fixture(tmp_path: Path) -> dict[str, Any]:
         "pair_ids": {"fresh"},
         "window_seconds": 10.0,
         "minimum_pair_count": 1,
+        "minimum_origin_count": 1,
     }
 
 
@@ -335,6 +361,75 @@ def test_requires_decisive_minimum_physical_session_count(tmp_path: Path) -> Non
         replay.discover_heldout_recordings(**fixture)
 
 
+def test_requires_three_bean_origins_for_decisive_cohort(tmp_path: Path) -> None:
+    """Six sessions from a narrow bean set are not final generalisation evidence."""
+    fixture = _discovery_fixture(tmp_path)
+    fixture["minimum_origin_count"] = 3
+
+    with pytest.raises(ValueError, match="require at least 3"):
+        replay.discover_heldout_recordings(**fixture)
+
+
+def test_rejects_mic2_label_copied_from_mic1(tmp_path: Path) -> None:
+    """Mic2 robustness cannot use a human mic1 annotation with the pair ID copied over."""
+    fixture = _discovery_fixture(tmp_path)
+    labels_dir = fixture["label_dirs"][0]
+    mic1 = json.loads((labels_dir / "fresh__mic1-fresh.json").read_text(encoding="utf-8"))
+    mic1["pair_id"] = "fresh"
+    _write_json(labels_dir / "fresh__mic2-fresh.json", mic1)
+
+    with pytest.raises(ValueError, match="Label stream identity does not match"):
+        replay.discover_heldout_recordings(**fixture)
+
+
+def test_rejects_mic2_without_derived_uncertainty_provenance(tmp_path: Path) -> None:
+    """A mic2 region must retain deterministic independent-clock derivation evidence."""
+    fixture = _discovery_fixture(tmp_path)
+    labels_dir = fixture["label_dirs"][0]
+    label_path = labels_dir / "fresh__mic2-fresh.json"
+    mic2 = json.loads(label_path.read_text(encoding="utf-8"))
+    mic2["provenance"]["alignment_uncertainty_seconds"] = float("nan")
+    _write_json(label_path, mic2)
+
+    with pytest.raises(ValueError, match="derived-mic uncertainty provenance"):
+        replay.discover_heldout_recordings(**fixture)
+
+
+def test_rejects_label_provenance_for_different_pair(tmp_path: Path) -> None:
+    """Matching surface metadata cannot override a mismatched provenance pair."""
+    fixture = _discovery_fixture(tmp_path)
+    label_path = fixture["label_dirs"][0] / "fresh__mic1-fresh.json"
+    mic1 = json.loads(label_path.read_text(encoding="utf-8"))
+    mic1["provenance"]["pair_id"] = "other"
+    _write_json(label_path, mic1)
+
+    with pytest.raises(ValueError, match="provenance does not match"):
+        replay.discover_heldout_recordings(**fixture)
+
+
+def test_rejects_non_human_mic1_ground_truth(tmp_path: Path) -> None:
+    """The primary live-path result requires human Label Studio ground truth."""
+    fixture = _discovery_fixture(tmp_path)
+    label_path = fixture["label_dirs"][0] / "fresh__mic1-fresh.json"
+    mic1 = json.loads(label_path.read_text(encoding="utf-8"))
+    mic1["provenance"]["annotation_source"] = "derived_from_paired_mic"
+    _write_json(label_path, mic1)
+
+    with pytest.raises(ValueError, match="not human Label Studio"):
+        replay.discover_heldout_recordings(**fixture)
+
+
+def test_rejects_holdout_without_origin(tmp_path: Path) -> None:
+    """Bean diversity cannot be audited when a session omits its origin."""
+    fixture = _discovery_fixture(tmp_path)
+    holdout = json.loads(fixture["holdout_capture_manifest_path"].read_text())
+    holdout["sessions"][0]["origin"] = ""
+    _write_json(fixture["holdout_capture_manifest_path"], holdout)
+
+    with pytest.raises(ValueError, match="no valid bean origin"):
+        replay.discover_heldout_recordings(**fixture)
+
+
 def test_rejects_recording_shorter_than_detector_window(tmp_path: Path) -> None:
     """Aborted captures shorter than one window are not valid full-roast holdouts."""
     fixture = _discovery_fixture(tmp_path)
@@ -369,7 +464,13 @@ def test_rejects_source_path_outside_manifest_root(tmp_path: Path) -> None:
             5.0,
             "premature_false_alert",
         ),
+        (
+            replay.FirstCrackRegion(20.0, 30.0, 0.0, "human"),
+            10.0,
+            "premature_false_alert",
+        ),
         (replay.FirstCrackRegion(20.0, 30.0, 0.0, "human"), 12.0, "detected"),
+        (replay.FirstCrackRegion(20.0, 30.0, 0.0, "human"), 30.0, "late_outside_region"),
     ],
 )
 def test_classify_outcome(
@@ -504,6 +605,7 @@ def test_replay_counts_all_events_and_preserves_first_notification(tmp_path: Pat
     }
     recording = replay.HeldOutRecording(
         pair_id="pair",
+        origin="bean-a",
         recording_id="pair__mic1",
         audio_path=tmp_path / "audio.wav",
         label_path=tmp_path / "label.json",

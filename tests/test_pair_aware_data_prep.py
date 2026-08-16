@@ -135,7 +135,9 @@ def _write_pair_chunks(root: Path, pair_count: int = 12) -> Path:
                     "chunk_filename": filename,
                     "recording_id": f"{pair_id}__mic{mic_num}",
                     "pair_id": pair_id,
-                    "source_audio_sha256": hashlib.sha256(filename.encode()).hexdigest(),
+                    "source_audio_sha256": hashlib.sha256(
+                        f"{pair_id}__mic{mic_num}".encode()
+                    ).hexdigest(),
                     "mic_num": mic_num,
                     "label": "first_crack",
                     "included": True,
@@ -183,6 +185,21 @@ def test_pair_manifest_rejects_traversing_label(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="Unsupported chunk label"):
+        group_chunks_by_pair(tmp_path, manifest)
+
+
+def test_pair_manifest_rejects_source_checksum_across_pair_ids(tmp_path: Path) -> None:
+    """Exact copied audio cannot be assigned independently through different pair IDs."""
+    manifest = _write_pair_chunks(tmp_path, pair_count=2)
+    rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()]
+    first_hash = rows[0]["source_audio_sha256"]
+    target_pair = rows[-1]["pair_id"]
+    for row in rows:
+        if row["pair_id"] == target_pair:
+            row["source_audio_sha256"] = first_hash
+    manifest.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Source checksum is assigned to multiple pair IDs"):
         group_chunks_by_pair(tmp_path, manifest)
 
 

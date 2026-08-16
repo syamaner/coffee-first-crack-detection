@@ -50,6 +50,7 @@ class HeldOutRecording:
     """One full recording assigned to the pair-safe test split."""
 
     pair_id: str
+    origin: str
     recording_id: str
     audio_path: Path
     label_path: Path
@@ -273,6 +274,60 @@ def _parse_region(label: dict[str, Any], label_path: Path) -> FirstCrackRegion |
     )
 
 
+def _validate_label_identity(
+    *,
+    label: dict[str, Any],
+    label_path: Path,
+    pair_id: str,
+    session: dict[str, Any],
+    stream: dict[str, Any],
+    primary_stream: dict[str, Any],
+) -> None:
+    """Prove a holdout annotation belongs to the expected paired stream."""
+    mic_num = int(stream["mic_num"])
+    audio_file = label.get("audio_file")
+    expected_basename = Path(str(stream["staged_relative_path"])).name
+    if (
+        not isinstance(audio_file, str)
+        or not audio_file
+        or "\\" in audio_file
+        or Path(audio_file).is_absolute()
+        or ".." in Path(audio_file).parts
+        or Path(audio_file).name != expected_basename
+        or label.get("pair_id") != pair_id
+        or label.get("mic_num") != mic_num
+        or label.get("origin") != session["origin"]
+        or label.get("roast_num") != session["roast_num"]
+        or label.get("original_filename") != stream["original_filename"]
+    ):
+        raise ValueError(f"Label stream identity does not match holdout manifest: {label_path}")
+
+    provenance = label.get("provenance")
+    if not isinstance(provenance, dict) or provenance.get("pair_id") != pair_id:
+        raise ValueError(f"Label provenance does not match holdout pair: {label_path}")
+    if mic_num == 1:
+        if provenance.get("annotation_source") != "human_label_studio":
+            raise ValueError(
+                f"Holdout mic1 label is not human Label Studio ground truth: {label_path}"
+            )
+        return
+
+    uncertainty = provenance.get("alignment_uncertainty_seconds")
+    if (
+        provenance.get("annotation_source") != "derived_from_paired_mic"
+        or provenance.get("derived_from") != primary_stream["staged_relative_path"]
+        or provenance.get("alignment") != "independent_clocks_not_sample_locked"
+        or provenance.get("exact_stream_start_offsets_available") is not False
+        or not isinstance(uncertainty, (int, float))
+        or isinstance(uncertainty, bool)
+        or not math.isfinite(float(uncertainty))
+        or uncertainty < 0
+    ):
+        raise ValueError(
+            f"Holdout mic2 label lacks valid derived-mic uncertainty provenance: {label_path}"
+        )
+
+
 def discover_heldout_recordings(
     *,
     split_integrity_path: Path,
@@ -283,6 +338,7 @@ def discover_heldout_recordings(
     pair_ids: set[str] | None,
     window_seconds: float,
     minimum_pair_count: int = 6,
+    minimum_origin_count: int = 3,
 ) -> list[HeldOutRecording]:
     """Discover a fresh full-roast holdout and fail closed on prior exposure."""
     split_pair_ids, _, split_source_hashes = _split_recording_ids(
@@ -300,6 +356,7 @@ def discover_heldout_recordings(
         raise ValueError(f"Holdout manifest source_root is not a directory: {source_root}")
     recordings: list[HeldOutRecording] = []
     discovered_pairs: set[str] = set()
+    discovered_origins: set[str] = set()
     cohort_hashes: set[str] = set()
     try:
         sessions = holdout_manifest["sessions"]
@@ -314,6 +371,10 @@ def discover_heldout_recordings(
             discovered_pairs.add(pair_id)
             if pair_id in split_pair_ids:
                 raise ValueError(f"Holdout pair {pair_id!r} already appears in a dataset split")
+            origin = session.get("origin")
+            if not isinstance(origin, str) or not origin or origin != origin.strip():
+                raise ValueError(f"Holdout pair {pair_id!r} has no valid bean origin")
+            discovered_origins.add(origin.casefold())
 
             sidecar_path = _resolve_source_file(
                 source_root,
@@ -341,6 +402,7 @@ def discover_heldout_recordings(
             streams = session["streams"]
             if len(streams) != 2 or {int(stream["mic_num"]) for stream in streams} != {1, 2}:
                 raise ValueError(f"Holdout pair {pair_id!r} must contain exactly mic1 and mic2")
+            primary_stream = next(stream for stream in streams if int(stream["mic_num"]) == 1)
             for stream in streams:
                 duration_sec = float(stream["duration_seconds"])
                 if not math.isfinite(duration_sec):
@@ -376,11 +438,18 @@ def discover_heldout_recordings(
                 recording_id = Path(str(stream["staged_relative_path"])).stem
                 label_path = _resolve_label_path(recording_id, label_dirs)
                 label = _read_json(label_path)
-                if str(label.get("pair_id")) != pair_id:
-                    raise ValueError(f"Label pair ID in {label_path} does not match {pair_id!r}")
+                _validate_label_identity(
+                    label=label,
+                    label_path=label_path,
+                    pair_id=pair_id,
+                    session=session,
+                    stream=stream,
+                    primary_stream=primary_stream,
+                )
                 recordings.append(
                     HeldOutRecording(
                         pair_id=pair_id,
+                        origin=origin,
                         recording_id=recording_id,
                         audio_path=audio_path,
                         label_path=label_path,
@@ -410,6 +479,12 @@ def discover_heldout_recordings(
             f"found {len(discovered_pairs)} physical sessions, require at least "
             f"{minimum_pair_count}"
         )
+    if len(discovered_origins) < minimum_origin_count:
+        raise ValueError(
+            "Fresh holdout cohort is too narrow: "
+            f"found {len(discovered_origins)} bean origins, require at least "
+            f"{minimum_origin_count}"
+        )
     return sorted(recordings, key=lambda item: (item.pair_id, item.mic_num or 0))
 
 
@@ -425,9 +500,9 @@ def classify_outcome(
     if detected_sec is None:
         return "missed"
     uncertainty = region.alignment_uncertainty_sec
-    if detected_sec + window_seconds < region.start_sec - uncertainty:
+    if detected_sec + window_seconds <= region.start_sec - uncertainty:
         return "premature_false_alert"
-    if detected_sec > region.end_sec + uncertainty:
+    if detected_sec >= region.end_sec + uncertainty:
         return "late_outside_region"
     return "detected"
 
@@ -619,6 +694,7 @@ def _evaluate_recording(
     )
     return {
         "pair_id": recording.pair_id,
+        "origin": recording.origin,
         "recording_id": recording.recording_id,
         "mic_num": recording.mic_num,
         "mic_label": recording.mic_label,
@@ -869,6 +945,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "holdout": [
             {
                 "pair_id": recording.pair_id,
+                "origin": recording.origin,
                 "recording_id": recording.recording_id,
                 "mic_num": recording.mic_num,
                 "audio_sha256": recording.source_sha256,
@@ -936,6 +1013,8 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "dataset_capture_manifest_path": str(args.dataset_capture_manifest.resolve()),
             "holdout_capture_manifest_path": str(args.holdout_capture_manifest.resolve()),
             "physical_session_count": len({item.pair_id for item in recordings}),
+            "bean_origin_count": len({item.origin for item in recordings}),
+            "bean_origins": sorted({item.origin for item in recordings}),
             "stream_recording_count": len(recordings),
             "pair_ids_absent_from_all_splits": True,
             "source_checksums_absent_from_all_splits": True,

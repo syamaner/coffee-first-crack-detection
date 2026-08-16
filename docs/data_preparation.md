@@ -380,7 +380,9 @@ checksum was already exposed to a split, including legacy recordings identified
 from the chunk manifest. It also requires authoritative recording-relative
 `beans_added` and `drop` milestones and verifies that drop occurs within both
 WAVs; WAV time zero is never assumed to equal charge. Aborted or incomplete
-recordings fail closed.
+recordings fail closed. Each mic1 label must retain human Label Studio
+provenance and exact stream identity; each mic2 label must match its stream and
+retain the derived independent-clock uncertainty provenance.
 
 The 16 Aug corpus does **not** contain a valid fresh holdout. Of 38 captured
 sessions, 34 are represented in the dataset splits. The remaining four are
@@ -393,7 +395,8 @@ Assign future sessions to the final holdout **before model inference and before
 adding them to any development dataset**. Reserve 6–10 complete physical roasts,
 preferably 10 (20 WAVs), spanning at least three beans and varied ambient
 conditions. Selection may use capture metadata, but must not use model scores or
-label outcomes. A held-out `pair_id` reserves both mic1 and mic2 together.
+label outcomes. The evaluator enforces at least six unique pair IDs and three
+distinct origins. A held-out `pair_id` reserves both mic1 and mic2 together.
 
 Store the cohort under `data/holdout/`, separate from `data/raw/`, and record its
 pair IDs and source checksums before evaluation. Every session must contain both
@@ -418,6 +421,10 @@ venv/bin/python scripts/evaluate_mcp_heldout.py \
   --labels-dir data/holdout/labels \
   --pair-id <fresh-session-uuid-1> \
   --pair-id <fresh-session-uuid-2> \
+  --pair-id <fresh-session-uuid-3> \
+  --pair-id <fresh-session-uuid-4> \
+  --pair-id <fresh-session-uuid-5> \
+  --pair-id <fresh-session-uuid-6> \
   --threads 8 --window-seconds 10 --overlap 0.7 \
   --threshold 0.6 --min-positive-windows 5 --confirmation-window 20 \
   --output results/baseline_v6_pair_aware_fresh_mcp_holdout.json
@@ -452,7 +459,10 @@ generate_recordings_manifest('data/raw', 'data/recordings.csv')
 "
 ```
 
-This auto-parses filenames to extract microphone and coffee origin metadata.
+This parses root-level legacy filenames and also reads every staged
+`capture_manifest.json` below `data/raw`. MCP rows use their UUID-safe relative
+path and preserve `pair_id`, origin, roast number, mic number/label, and original
+filename instead of trying to parse the UUID-prefixed staged basename.
 
 ---
 
