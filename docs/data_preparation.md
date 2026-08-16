@@ -86,6 +86,7 @@ The `roast.recording.json` manifest (written by
   "session_id": "<run-id>",
   "recording_started_monotonic_seconds": 1234.56,  // monotonic clock at record start; null if unknown
   "milestones": {                                   // recording-relative seconds, or null per milestone
+    "beans_added": 45.2,
     "first_crack": 512.3,
     "drop": 640.0
   },
@@ -357,6 +358,67 @@ data/splits/
 `split_integrity.json` asserts that train, validation, and test pair-ID
 intersections are empty and reports physical-session counts separately from
 stream/recording counts. The fixed seed makes assignments deterministic.
+
+### Fresh full-recording MCP holdout
+
+Chunk-level test metrics do not prove that a roast produces one correctly timed
+notification. The decisive deployment test replays complete, newly captured
+physical sessions through the actual `coffee-roaster-mcp` ONNX backend, audio
+window pipeline, and confirmation adapter used by the agent harness.
+
+Freeze this protocol **before running inference**:
+
+- unpublished candidate INT8 ONNX SHA-256;
+- 8 ONNX threads on the live Mac profile;
+- 10 s windows, 0.7 overlap (3 s hop), threshold 0.6;
+- 5 qualifying windows within 20 s;
+- mic1 as the primary live-path result and mic2 as paired robustness evidence.
+
+Do not reuse train, validation, or the existing 541-chunk test sessions. The
+evaluator rejects a holdout when either its `pair_id` or either source WAV
+checksum was already exposed to a split. It also requires
+`roast.recording.json:milestones.beans_added`; WAV time zero is never assumed to
+equal charge. Aborted recordings shorter than one detector window fail closed.
+
+The 16 Aug corpus does **not** contain a valid fresh holdout. Of 38 captured
+sessions, 34 are represented in the dataset splits. The remaining four are
+5.9–7.25 s aborted/fault captures with no `beans_added` milestone, so they are
+not full roasts and cannot produce even one 10 s detector window.
+
+After recording fresh sessions, stage them into a separate local holdout tree,
+label only their UUID-prefixed mic1 files in Label Studio, convert the export,
+and derive mic2 exactly as in Steps 1–4. Keep their pair IDs out of chunking,
+splitting, model selection, and threshold selection. Then run:
+
+```bash
+venv/bin/python scripts/evaluate_mcp_heldout.py \
+  --mcp-src /Users/sertanyamaner/git/coffee-roaster-mcp/src \
+  --onnx-dir exports/onnx-baseline-v6-pair-aware/int8 \
+  --dataset-capture-manifest data/raw/mcp-captures/capture_manifest.json \
+  --holdout-capture-manifest data/holdout/mcp-captures/capture_manifest.json \
+  --labels-dir data/holdout/labels \
+  --pair-id <fresh-session-uuid-1> \
+  --pair-id <fresh-session-uuid-2> \
+  --threads 8 --window-seconds 10 --overlap 0.7 \
+  --threshold 0.6 --min-positive-windows 5 --confirmation-window 20 \
+  --output results/baseline_v6_pair_aware_fresh_mcp_holdout.json
+```
+
+Before the first model call, the command writes a sibling
+`*.protocol.json` lock containing the model/preprocessor hashes, frozen profile,
+pair IDs, WAV/label hashes, T0 offsets, and mic roles. Re-running the same output
+path with any change fails. Per roast and per mic, the report preserves:
+
+- pre-FC false notification, miss, and detection count (maximum one event);
+- backdated event error: earliest qualifying window onset minus labelled FC;
+- operational confirmation latency: the fifth qualifying window end plus its
+  measured inference time, minus labelled FC;
+- per-window inference latency; and
+- mic1/mic2 event-time difference, with mic2 uncertainty retained.
+
+If the frozen candidate needs tuning after this replay, those recordings become
+development evidence. Do not tune on them and continue calling them a final
+holdout; reserve newly captured sessions for the next decisive evaluation.
 
 ---
 

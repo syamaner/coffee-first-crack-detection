@@ -1,5 +1,53 @@
 # Evaluation Results
 
+## baseline_v6_pair_aware / leakage-free candidate (16 Aug 2026)
+
+The pair-safe 541-window test set reports 97.0% accuracy, 0.852 F1, 80.7%
+precision, 90.2% recall, and 0.9764 ROC-AUC for the unpublished INT8 candidate
+(TN/FP/FN/TP = 479/11/5/46). This remains a chunk-classification result, not a
+whole-roast event test.
+
+The same fixed candidate was re-evaluated using the production Mac setting of
+8 ONNX threads (10 s inputs, all 541 test windows). Quality was unchanged and
+end-to-end per-window latency was:
+
+| Threads | p50 (ms) | p95 (ms) | mean (ms) | 500 ms target |
+| ---: | ---: | ---: | ---: | --- |
+| 2 | 641.5 | 656.8 | — | fail |
+| **8** | **202.7** | **204.9** | **202.9** | **pass** |
+
+Reproduce the production-thread result:
+
+```bash
+venv/bin/python scripts/evaluate_onnx.py \
+  --onnx-dir exports/onnx-baseline-v6-pair-aware/int8 \
+  --test-dir data/splits/test \
+  --threads 8 \
+  --output results/baseline_v6_pair_aware_int8_8threads_eval.json
+```
+
+Candidate INT8 SHA-256:
+`324eb3d1b603c10d09759ad7e7019fcc2a7252d9712c2ec57946f9e81c2bd6e4`.
+
+### Fresh full-roast holdout status
+
+No decisive fresh full-roast holdout can be run from the current corpus. All 34
+complete/stageable MCP sessions appear in train, validation, or the existing
+541-window test set. The only four session IDs absent from every split are
+aborted/fault captures lasting 5.9–7.25 seconds; each lacks an authoritative
+recording-relative `beans_added` milestone and is shorter than the 10-second
+detector window.
+
+`scripts/evaluate_mcp_heldout.py` now runs the real `coffee-roaster-mcp` ONNX
+backend, detector-paced WAV pipeline, and confirmation adapter against a fresh
+cohort. It freezes the model/profile/cohort before inference and fails closed on
+prior pair/checksum exposure, missing T0 alignment, incomplete mic pairs, short
+recordings, or changed protocol inputs. Mic1 is primary and mic2 is reported as
+paired robustness evidence. See `docs/data_preparation.md` for the exact resume
+command after newly captured mic1 holdout labels are exported.
+
+---
+
 ## baseline_v5 / 303-sample test set (12 Jul, issue #55)
 
 Reconciliation of a headline-number discrepancy: the committed

@@ -112,7 +112,8 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 
 **Phase 7 complete.** S19 (#46) + S20 (#47) delivered in PR #48.
 
-**S22 implementation and evaluation complete — draft PR review pending** (#68):
+**S22 implementation and leakage-free chunk evaluation complete; fresh full-roast holdout
+pending — draft PR review pending** (#68):
 - all 38 submitted mic1 tasks converted (18 with a region, 20 explicitly empty) and all 38
   linked mic2 annotations derived with the independent-clock 3.5 s uncertainty policy
 - 5,612 usable chunks rebuilt from 52 contributing physical sessions / 89 streams; 48 derived
@@ -122,6 +123,13 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
   intersections and byte-identical manifests across two rebuilds
 - leakage-free `baseline_v6_pair_aware` test: 96.5% accuracy / 0.832 F1 / 92.2% recall;
   INT8: 97.0% / 0.852 F1 / 90.2% recall on the same 541 chunks
+- production Mac INT8 profile (8 threads): p50 202.7 ms / p95 204.9 ms / mean 202.9 ms
+  across the same 541 windows, passing the 500 ms target; quality unchanged
+- exact-MCP full-recording replay harness added with immutable protocol locking, pair/checksum
+  independence checks, authoritative recording-relative T0, mic1-primary/mic2-robustness
+  reporting, and separate backdated-event versus operational-confirmation timing
+- decisive full-roast replay remains pending: 34/38 MCP sessions are already split-exposed; the
+  only four unseen sessions are 5.9–7.25 s aborted/fault captures with no charge milestone
 - no model was published and no production ONNX artifact was replaced
 
 **S19 — Multi-mic recording** (`scripts/record_mics.py`):
@@ -231,6 +239,7 @@ python scripts/push_to_hub.py \
 | ONNX INT8, baseline_v5 (Mac, 2 threads) | 98.3% | 0.943 | 97.6% | p50=216ms ✅ (re-benchmarked 12 Jul, #55 — 4 FP, marginally better precision than fp32) |
 | **baseline_v6_pair_aware (leakage-free)** | **96.5%** | **0.832** | **92.2%** | **5,612 chunks, 52 contributing physical sessions, 541-sample pair-safe test set, 4 FN / 15 FP, precision 75.8%, ROC-AUC 0.9756; not published** |
 | ONNX INT8, baseline_v6_pair_aware (Mac, 2 threads) | 97.0% | 0.852 | 90.2% | same 541-sample pair-safe test set, 5 FN / 11 FP, precision 80.7%, ROC-AUC 0.9764, p50=642ms; not published |
+| ONNX INT8, baseline_v6_pair_aware (Mac, 8 threads) | 97.0% | 0.852 | 90.2% | production agent/MCP thread setting on the same 541-window test: p50=202.7ms, p95=204.9ms, mean=202.9ms; not a fresh full-roast holdout; not published |
 | ONNX INT8 (RPi5, 4 threads, fan) | 93.3% | 0.933 | 95.5% | p50=2,070ms ⭐ recommended (pre-baseline_v5 ONNX validation, see note below) |
 | ONNX INT8 (RPi5, 2 threads) | 93.3% | 0.933 | 95.5% | p50=2,436ms ⚠️ thermal throttled (pre-baseline_v5 ONNX validation, see note below) |
 | ONNX INT8 (RPi5, 1 thread) | 93.3% | 0.933 | 95.5% | p50=4,441ms ⚠️ (pre-baseline_v5 ONNX validation, see note below) |

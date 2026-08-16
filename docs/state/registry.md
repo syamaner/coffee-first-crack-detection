@@ -4,7 +4,7 @@
 
 | Epic | GitHub Issue | Status | Phase |
 |------|-------------|--------|-------|
-| Coffee First Crack Detection — HuggingFace Model Repository | [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1) | 🔄 Active | S22 leakage-free evaluation complete; draft PR review pending (2026-08-16) |
+| Coffee First Crack Detection — HuggingFace Model Repository | [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1) | 🔄 Active | S22 pair-safe chunk evaluation complete; fresh full-roast holdout awaits new captures; draft PR review pending (2026-08-16) |
 
 ## Links
 - GitHub Repo: https://github.com/syamaner/coffee-first-crack-detection
