@@ -57,6 +57,7 @@ class HeldOutRecording:
     mic_label: str | None
     source_sha256: str
     t0_offset_sec: float
+    drop_offset_sec: float
     region: FirstCrackRegion | None
 
 
@@ -82,6 +83,24 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _snapshot_inputs(paths: dict[str, Path]) -> dict[str, dict[str, str]]:
+    """Freeze paths and checksums for every dataset/holdout exposure input."""
+    snapshot: dict[str, dict[str, str]] = {}
+    for name, path in paths.items():
+        resolved = path.resolve()
+        if not resolved.is_file():
+            raise ValueError(f"Missing replay evidence input {name}: {resolved}")
+        snapshot[name] = {"path": str(resolved), "sha256": _sha256(resolved)}
+    return snapshot
+
+
+def _verify_input_snapshot(paths: dict[str, Path], expected: dict[str, dict[str, str]]) -> None:
+    """Fail if an exposure/cohort input changes during discovery or replay."""
+    current = _snapshot_inputs(paths)
+    if current != expected:
+        raise RuntimeError("Replay evidence inputs changed after the protocol was frozen")
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     """Read a JSON object or fail with path context."""
     try:
@@ -94,23 +113,36 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _git_head(repository_root: Path) -> str:
-    """Return a repository HEAD using an explicitly resolved Git executable."""
+    """Return a clean repository HEAD using an explicitly resolved Git executable."""
     git_executable = shutil.which("git")
     if git_executable is None:
         raise RuntimeError("Git executable is required to freeze the MCP source revision")
     # The executable is resolved above, argv is constant, and shell execution is disabled.
-    return subprocess.run(  # noqa: S603
+    head = subprocess.run(  # noqa: S603
         [git_executable, "rev-parse", "HEAD"],
         cwd=repository_root,
         check=True,
         capture_output=True,
         text=True,
     ).stdout.strip()
+    status = subprocess.run(  # noqa: S603
+        [git_executable, "status", "--porcelain", "--untracked-files=all"],
+        cwd=repository_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if status:
+        raise RuntimeError(
+            "Selected MCP checkout is dirty; commit or remove all tracked and untracked "
+            "changes before freezing the replay protocol"
+        )
+    return head
 
 
 def _split_recording_ids(
     split_integrity_path: Path, chunk_manifest_path: Path
-) -> tuple[set[str], set[tuple[str, str]]]:
+) -> tuple[set[str], set[tuple[str, str]], set[str]]:
     """Resolve all pair and stream IDs already assigned to dataset splits."""
     integrity = _read_json(split_integrity_path)
     try:
@@ -123,6 +155,7 @@ def _split_recording_ids(
         raise ValueError(f"Malformed split integrity report {split_integrity_path}") from exc
 
     resolved: set[tuple[str, str]] = set()
+    source_hash_by_recording: dict[tuple[str, str], str] = {}
     try:
         lines = chunk_manifest_path.read_text(encoding="utf-8").splitlines()
     except OSError as exc:
@@ -134,12 +167,25 @@ def _split_recording_ids(
             row = json.loads(line)
             pair_id = str(row["pair_id"])
             recording_id = str(row["recording_id"])
+            source_sha256 = str(row["source_audio_sha256"])
         except (json.JSONDecodeError, KeyError, TypeError) as exc:
             raise ValueError(
                 f"Malformed chunk manifest row {chunk_manifest_path}:{line_number}"
             ) from exc
         if pair_id in split_pair_ids:
-            resolved.add((pair_id, recording_id))
+            if len(source_sha256) != 64 or any(
+                character not in "0123456789abcdef" for character in source_sha256
+            ):
+                raise ValueError(
+                    f"Invalid source_audio_sha256 in {chunk_manifest_path}:{line_number}"
+                )
+            identity = (pair_id, recording_id)
+            previous = source_hash_by_recording.setdefault(identity, source_sha256)
+            if previous != source_sha256:
+                raise ValueError(
+                    f"Conflicting source checksums for {identity!r} in {chunk_manifest_path}"
+                )
+            resolved.add(identity)
 
     if len(resolved) != expected_streams:
         raise ValueError(
@@ -151,7 +197,7 @@ def _split_recording_ids(
         missing = sorted(split_pair_ids - resolved_pair_ids)
         extra = sorted(resolved_pair_ids - split_pair_ids)
         raise ValueError(f"Split pair mismatch; missing={missing}, extra={extra}")
-    return split_pair_ids, resolved
+    return split_pair_ids, resolved, set(source_hash_by_recording.values())
 
 
 def _used_source_hashes(capture_manifest_path: Path, split_pair_ids: set[str]) -> set[str]:
@@ -236,10 +282,15 @@ def discover_heldout_recordings(
     label_dirs: tuple[Path, ...],
     pair_ids: set[str] | None,
     window_seconds: float,
+    minimum_pair_count: int = 6,
 ) -> list[HeldOutRecording]:
     """Discover a fresh full-roast holdout and fail closed on prior exposure."""
-    split_pair_ids, _ = _split_recording_ids(split_integrity_path, chunk_manifest_path)
-    used_hashes = _used_source_hashes(dataset_capture_manifest_path, split_pair_ids)
+    split_pair_ids, _, split_source_hashes = _split_recording_ids(
+        split_integrity_path, chunk_manifest_path
+    )
+    used_hashes = split_source_hashes | _used_source_hashes(
+        dataset_capture_manifest_path, split_pair_ids
+    )
     holdout_manifest = _read_json(holdout_capture_manifest_path)
     source_root_value = holdout_manifest.get("source_root")
     if not isinstance(source_root_value, str) or not Path(source_root_value).is_absolute():
@@ -249,6 +300,7 @@ def discover_heldout_recordings(
         raise ValueError(f"Holdout manifest source_root is not a directory: {source_root}")
     recordings: list[HeldOutRecording] = []
     discovered_pairs: set[str] = set()
+    cohort_hashes: set[str] = set()
     try:
         sessions = holdout_manifest["sessions"]
         for session in sessions:
@@ -270,24 +322,40 @@ def discover_heldout_recordings(
             )
             sidecar = _read_json(sidecar_path)
             milestones = sidecar.get("milestones")
-            if not isinstance(milestones, dict) or milestones.get("beans_added") is None:
+            if (
+                not isinstance(milestones, dict)
+                or milestones.get("beans_added") is None
+                or milestones.get("drop") is None
+            ):
                 raise ValueError(
                     f"Holdout pair {pair_id!r} lacks an authoritative recording-relative "
-                    "beans_added milestone"
+                    "beans_added or drop milestone"
                 )
             t0_offset_sec = float(milestones["beans_added"])
+            drop_offset_sec = float(milestones["drop"])
             if not math.isfinite(t0_offset_sec) or t0_offset_sec < 0:
                 raise ValueError(f"Invalid beans_added milestone for holdout pair {pair_id!r}")
+            if not math.isfinite(drop_offset_sec) or drop_offset_sec <= t0_offset_sec:
+                raise ValueError(f"Invalid drop milestone for holdout pair {pair_id!r}")
 
             streams = session["streams"]
             if len(streams) != 2 or {int(stream["mic_num"]) for stream in streams} != {1, 2}:
                 raise ValueError(f"Holdout pair {pair_id!r} must contain exactly mic1 and mic2")
             for stream in streams:
                 duration_sec = float(stream["duration_seconds"])
+                if not math.isfinite(duration_sec):
+                    raise ValueError(
+                        f"Invalid duration for holdout pair {pair_id!r} mic{stream['mic_num']}"
+                    )
                 if duration_sec < window_seconds:
                     raise ValueError(
                         f"Holdout pair {pair_id!r} mic{stream['mic_num']} is only "
                         f"{duration_sec:.2f}s; at least {window_seconds:.2f}s is required"
+                    )
+                if drop_offset_sec > duration_sec:
+                    raise ValueError(
+                        f"Holdout pair {pair_id!r} drop milestone {drop_offset_sec:.2f}s "
+                        f"exceeds mic{stream['mic_num']} duration {duration_sec:.2f}s"
                     )
                 source_sha256 = str(stream["sha256"])
                 if source_sha256 in used_hashes:
@@ -295,11 +363,16 @@ def discover_heldout_recordings(
                         f"Holdout pair {pair_id!r} reuses a source checksum already exposed "
                         "to a dataset split"
                     )
+                if source_sha256 in cohort_hashes:
+                    raise ValueError(
+                        f"Duplicate source checksum within holdout cohort: {source_sha256}"
+                    )
                 audio_path = _resolve_source_file(
                     source_root, stream["source_path"], field="streams[].source_path"
                 )
                 if _sha256(audio_path) != source_sha256:
                     raise ValueError(f"Held-out source checksum changed: {audio_path}")
+                cohort_hashes.add(source_sha256)
                 recording_id = Path(str(stream["staged_relative_path"])).stem
                 label_path = _resolve_label_path(recording_id, label_dirs)
                 label = _read_json(label_path)
@@ -315,6 +388,7 @@ def discover_heldout_recordings(
                         mic_label=str(stream["label"]),
                         source_sha256=source_sha256,
                         t0_offset_sec=t0_offset_sec,
+                        drop_offset_sec=drop_offset_sec,
                         region=_parse_region(label, label_path),
                     )
                 )
@@ -329,6 +403,12 @@ def discover_heldout_recordings(
     if not recordings:
         raise ValueError(
             "No fresh holdout recordings were found; provide new pair IDs absent from all splits"
+        )
+    if len(discovered_pairs) < minimum_pair_count:
+        raise ValueError(
+            "Fresh holdout cohort is not decisive: "
+            f"found {len(discovered_pairs)} physical sessions, require at least "
+            f"{minimum_pair_count}"
         )
     return sorted(recordings, key=lambda item: (item.pair_id, item.mic_num or 0))
 
@@ -463,7 +543,8 @@ def _evaluate_recording(
     pipeline.start()
 
     first_window_started: float | None = None
-    event: Any | None = None
+    first_event: Any | None = None
+    event_count = 0
     processed_windows = 0
     positive_windows = 0
     max_confidence = 0.0
@@ -492,9 +573,10 @@ def _evaluate_recording(
             if observation.fc_status in {"candidate", "confirmed"}:
                 positive_windows += 1
             if observation.event is not None:
-                event = observation.event
-                confirming_inference_latency_ms = inference_latency_ms
-                break
+                event_count += 1
+                if first_event is None:
+                    first_event = observation.event
+                    confirming_inference_latency_ms = inference_latency_ms
     finally:
         pipeline.stop()
 
@@ -503,13 +585,17 @@ def _evaluate_recording(
     event_confidence: float | None = None
     confirming_sequence: int | None = None
     notification_sec: float | None = None
-    if event is not None:
+    if first_event is not None:
         if first_window_started is None:
             raise RuntimeError("MCP emitted an event before the first replay window")
-        detected_sec = round(float(event.detected_at_monotonic_seconds) - first_window_started, 6)
-        confirmed_sec = round(float(event.confirmed_at_monotonic_seconds) - first_window_started, 6)
-        event_confidence = None if event.confidence is None else float(event.confidence)
-        confirming_sequence = int(event.confirmed_by_window_sequence_number)
+        detected_sec = round(
+            float(first_event.detected_at_monotonic_seconds) - first_window_started, 6
+        )
+        confirmed_sec = round(
+            float(first_event.confirmed_at_monotonic_seconds) - first_window_started, 6
+        )
+        event_confidence = None if first_event.confidence is None else float(first_event.confidence)
+        confirming_sequence = int(first_event.confirmed_by_window_sequence_number)
         if confirming_inference_latency_ms is None:
             raise RuntimeError("MCP confirmation is missing its measured inference latency")
         notification_sec = confirmed_sec + confirming_inference_latency_ms / 1000.0
@@ -543,11 +629,12 @@ def _evaluate_recording(
         "t0_alignment": {
             "source": "roast.recording.json:milestones.beans_added",
             "wav_offset_sec": recording.t0_offset_sec,
+            "drop_wav_offset_sec": recording.drop_offset_sec,
             "label_start_sec_after_t0": label_start_after_t0,
         },
         "resampled_to_16khz_temporary_copy": resampled,
-        "detected": event is not None,
-        "event_count": 1 if event is not None else 0,
+        "detected": first_event is not None,
+        "event_count": event_count,
         "detected_sec": detected_sec,
         "confirmed_sec": confirmed_sec,
         "notification_sec": notification_sec,
@@ -560,7 +647,7 @@ def _evaluate_recording(
         "max_processed_confidence": max_confidence,
         "confirming_window_sequence": confirming_sequence,
         "processed_window_count": processed_windows,
-        "positive_window_count_before_stop": positive_windows,
+        "positive_window_count": positive_windows,
         "inference_latency_ms": _distribution(inference_latencies_ms),
         "confirming_inference_latency_ms": confirming_inference_latency_ms,
         "outcome": classify_outcome(
@@ -727,6 +814,15 @@ def _freeze_protocol(path: Path, protocol: dict[str, Any]) -> None:
 
 def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     """Run the complete held-out MCP replay and return its auditable report."""
+    evidence_paths = {
+        "split_integrity": args.split_integrity,
+        "chunk_manifest": args.chunk_manifest,
+        "dataset_capture_manifest": args.dataset_capture_manifest,
+        "holdout_capture_manifest": args.holdout_capture_manifest,
+    }
+    evidence_snapshot = _snapshot_inputs(evidence_paths)
+    mcp_root = args.mcp_src.resolve().parent
+    git_head = _git_head(mcp_root)
     mcp = _load_mcp(args.mcp_src)
     recordings = discover_heldout_recordings(
         split_integrity_path=args.split_integrity,
@@ -737,6 +833,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         pair_ids=None if args.pair_id is None else set(args.pair_id),
         window_seconds=args.window_seconds,
     )
+    _verify_input_snapshot(evidence_paths, evidence_snapshot)
     artifacts = _resolved_artifacts(
         mcp,
         onnx_dir=args.onnx_dir,
@@ -745,8 +842,6 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     )
     model_path = Path(artifacts.onnx_model.local_path)
     hop_seconds = args.window_seconds * (1.0 - args.overlap)
-    mcp_root = args.mcp_src.resolve().parent
-    git_head = _git_head(mcp_root)
     protocol = {
         "schema_version": 1,
         "status": "frozen_before_inference",
@@ -770,6 +865,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "primary_stream": "mic1",
             "paired_robustness_stream": "mic2",
         },
+        "dataset_exposure_evidence": evidence_snapshot,
         "holdout": [
             {
                 "pair_id": recording.pair_id,
@@ -778,6 +874,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 "audio_sha256": recording.source_sha256,
                 "label_sha256": _sha256(recording.label_path),
                 "t0_offset_sec": recording.t0_offset_sec,
+                "drop_offset_sec": recording.drop_offset_sec,
             }
             for recording in recordings
         ],
@@ -826,6 +923,8 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 flush=True,
             )
 
+    _verify_input_snapshot(evidence_paths, evidence_snapshot)
+
     report = {
         "schema_version": 1,
         "generated_at_unix_seconds": time.time(),
@@ -841,6 +940,8 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "pair_ids_absent_from_all_splits": True,
             "source_checksums_absent_from_all_splits": True,
             "authoritative_t0_alignment_present": True,
+            "complete_roast_drop_milestone_present": True,
+            "dataset_exposure_evidence": evidence_snapshot,
         },
         "mcp": {"source_path": str(mcp_root), "git_head": git_head},
         "model": {

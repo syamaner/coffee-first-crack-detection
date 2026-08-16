@@ -17,6 +17,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -260,6 +261,15 @@ def save_chunk(samples: np.ndarray, path: Path, sr: int) -> None:
     sf.write(str(path), samples, sr)
 
 
+def sha256_file(path: Path) -> str:
+    """Return a source recording digest for split-exposure auditing."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def process_recording(
     annotation_path: Path,
     audio_dir: Path,
@@ -299,6 +309,7 @@ def process_recording(
 
     if not audio_path.exists():
         raise FileNotFoundError(f"Annotated audio file not found: {audio_path}")
+    source_audio_sha256 = sha256_file(audio_path)
 
     print(f"\n📁 Processing: {audio_file}")
     audio, loaded_sr = librosa.load(str(audio_path), sr=sample_rate, mono=True)
@@ -358,6 +369,7 @@ def process_recording(
             "chunk_filename": filename,
             "recording_id": stem,
             "pair_id": resolved_pair_id,
+            "source_audio_sha256": source_audio_sha256,
             "mic_num": resolved_mic_num,
             "label": lbl,
             "start_sec": start,
@@ -409,12 +421,16 @@ def build_legacy_pair_index(session_dir: Path) -> dict[str, tuple[str, int]]:
     index: dict[str, tuple[str, int]] = {}
     if not session_dir.exists():
         return index
-    for path in sorted(session_dir.glob("*-session.json")):
+    session_paths = sorted(
+        [*session_dir.glob("*-session.json"), *session_dir.glob("*-session_partial.json")]
+    )
+    for path in session_paths:
         with path.open("r", encoding="utf-8") as handle:
             session: Any = json.load(handle)
         if not isinstance(session, dict) or not isinstance(session.get("mics"), list):
             raise ValueError(f"Malformed legacy session sidecar: {path}")
-        pair_id = f"legacy:{path.name.removesuffix('-session.json')}"
+        session_name = path.name.removesuffix("-session.json").removesuffix("-session_partial.json")
+        pair_id = f"legacy:{session_name}"
         seen_mics: set[int] = set()
         for mic in session["mics"]:
             if not isinstance(mic, dict):

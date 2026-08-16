@@ -173,6 +173,7 @@ def _validate_session(
         raise ValueError(f"Capture directory is not a 32-character lowercase UUID: {session_dir}")
     if session_dir.is_symlink():
         raise ValueError(f"Capture session directories may not be symlinks: {session_dir}")
+    session_dir = session_dir.resolve()
 
     annotation_sidecar = _find_annotation_sidecar(session_dir)
     recording_sidecar = session_dir / "roast.recording.json"

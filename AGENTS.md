@@ -41,6 +41,11 @@ python -m coffee_first_crack.data_prep.ingest_mcp_captures \
   --capture-root /Users/sertanyamaner/roasts/captures \
   --output data/raw/mcp-captures --dry-run
 
+# Stage only after the dry-run succeeds
+python -m coffee_first_crack.data_prep.ingest_mcp_captures \
+  --capture-root /Users/sertanyamaner/roasts/captures \
+  --output data/raw/mcp-captures
+
 # Generate recordings manifest from data/raw/
 python -c "from coffee_first_crack.dataset import generate_recordings_manifest; generate_recordings_manifest('data/raw', 'data/recordings.csv')"
 

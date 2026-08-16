@@ -111,13 +111,80 @@ def test_manifest_conversion_resolves_label_studio_truncated_upload(
     truncated_name = f"{staged_name[:-12]}_EsoDqTW.wav"
 
     converted = conversion.convert_task(
-        {"file_upload": f"deadbeef-{truncated_name}", "annotations": []},
+        {"file_upload": f"deadbeef-{truncated_name}", "annotations": [{"result": []}]},
         tmp_path,
         manifest,
     )
 
     assert converted["pair_id"] == "a" * 32
     assert converted["audio_file"] == f"mcp/{mic1['staged_relative_path']}"
+
+
+def test_manifest_conversion_rejects_unsubmitted_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unfinished task cannot silently become whole-recording negative ground truth."""
+    staging_root = tmp_path / "mcp"
+    manifest = _manifest(staging_root)
+    mic1 = manifest["sessions"][0]["streams"][0]
+    audio_path = staging_root / mic1["staged_relative_path"]
+    audio_path.parent.mkdir(parents=True)
+    audio_path.write_bytes(b"stub")
+    monkeypatch.setattr(conversion.librosa, "get_duration", lambda **_: 100.0)
+
+    with pytest.raises(ValueError, match="exactly one submitted"):
+        conversion.convert_task(
+            {"file_upload": f"deadbeef-{audio_path.name}", "annotations": []},
+            tmp_path,
+            manifest,
+        )
+
+
+@pytest.mark.parametrize(
+    "annotations",
+    [None, ["malformed"], [{"was_cancelled": "false", "result": []}]],
+)
+def test_manifest_conversion_rejects_malformed_submission_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    annotations: object,
+) -> None:
+    """Malformed Label Studio submission metadata fails closed."""
+    staging_root = tmp_path / "mcp"
+    manifest = _manifest(staging_root)
+    mic1 = manifest["sessions"][0]["streams"][0]
+    audio_path = staging_root / mic1["staged_relative_path"]
+    audio_path.parent.mkdir(parents=True)
+    audio_path.write_bytes(b"stub")
+    monkeypatch.setattr(conversion.librosa, "get_duration", lambda **_: 100.0)
+
+    with pytest.raises(ValueError, match="annotation|cancellation"):
+        conversion.convert_task(
+            {"file_upload": f"deadbeef-{audio_path.name}", "annotations": annotations},
+            tmp_path,
+            manifest,
+        )
+
+
+def test_manifest_conversion_accepts_submitted_explicit_negative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A submitted annotation object with an empty result remains a valid negative."""
+    staging_root = tmp_path / "mcp"
+    manifest = _manifest(staging_root)
+    mic1 = manifest["sessions"][0]["streams"][0]
+    audio_path = staging_root / mic1["staged_relative_path"]
+    audio_path.parent.mkdir(parents=True)
+    audio_path.write_bytes(b"stub")
+    monkeypatch.setattr(conversion.librosa, "get_duration", lambda **_: 100.0)
+
+    converted = conversion.convert_task(
+        {"file_upload": f"deadbeef-{audio_path.name}", "annotations": [{"result": []}]},
+        tmp_path,
+        manifest,
+    )
+
+    assert converted["annotations"] == []
 
 
 def test_manifest_conversion_rejects_inconsistent_truncated_upload(tmp_path: Path) -> None:

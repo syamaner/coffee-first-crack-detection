@@ -128,6 +128,21 @@ class TestMcpCaptureStaging:
 
         assert not output.exists()
 
+    def test_relative_capture_root_produces_absolute_source_paths(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        capture_root = tmp_path / "captures"
+        _make_session(capture_root, "2" * 32)
+        monkeypatch.chdir(tmp_path)
+
+        manifest = stage_captures(Path("captures"), Path("staged"), dry_run=True)
+
+        session = manifest["sessions"][0]
+        assert Path(session["source_session_dir"]).is_absolute()
+        assert Path(session["session_sidecar_source_path"]).is_absolute()
+        assert Path(session["recording_sidecar_source_path"]).is_absolute()
+        assert all(Path(stream["source_path"]).is_absolute() for stream in session["streams"])
+
     @pytest.mark.parametrize("defect", ["missing_wav", "malformed_sidecar", "traversal"])
     def test_invalid_sessions_fail_closed(self, tmp_path: Path, defect: str) -> None:
         capture_root = tmp_path / "captures"

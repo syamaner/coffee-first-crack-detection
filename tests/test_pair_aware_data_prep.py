@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -102,6 +103,24 @@ def test_panama_style_session_names_resolve_to_one_pair(tmp_path: Path) -> None:
     )
 
 
+def test_partial_session_names_resolve_to_one_pair(tmp_path: Path) -> None:
+    """Explicitly retained partial recordings cannot split by microphone."""
+    sidecar = {
+        "mics": [
+            {"mic_num": 1, "file": "mic1-brazil-roast4_partial.wav"},
+            {"mic_num": 2, "file": "mic2-brazil-roast4_partial.wav"},
+        ]
+    }
+    (tmp_path / "brazil-roast4-session_partial.json").write_text(
+        json.dumps(sidecar), encoding="utf-8"
+    )
+
+    index = build_legacy_pair_index(tmp_path)
+
+    assert index["mic1-brazil-roast4_partial.wav"][0] == "legacy:brazil-roast4"
+    assert index["mic1-brazil-roast4_partial.wav"][0] == index["mic2-brazil-roast4_partial.wav"][0]
+
+
 def _write_pair_chunks(root: Path, pair_count: int = 12) -> Path:
     records: list[dict[str, object]] = []
     for pair_number in range(pair_count):
@@ -116,6 +135,7 @@ def _write_pair_chunks(root: Path, pair_count: int = 12) -> Path:
                     "chunk_filename": filename,
                     "recording_id": f"{pair_id}__mic{mic_num}",
                     "pair_id": pair_id,
+                    "source_audio_sha256": hashlib.sha256(filename.encode()).hexdigest(),
                     "mic_num": mic_num,
                     "label": "first_crack",
                     "included": True,
@@ -153,6 +173,7 @@ def test_pair_manifest_rejects_traversing_label(tmp_path: Path) -> None:
                 "chunk_filename": "chunk.wav",
                 "recording_id": "recording",
                 "pair_id": "pair",
+                "source_audio_sha256": "0" * 64,
                 "label": "../escape",
                 "included": True,
             }
@@ -179,6 +200,7 @@ def test_pair_manifest_rejects_symlinked_chunk(tmp_path: Path) -> None:
                 "chunk_filename": "chunk.wav",
                 "recording_id": "recording",
                 "pair_id": "pair",
+                "source_audio_sha256": "0" * 64,
                 "label": "first_crack",
                 "included": True,
             }

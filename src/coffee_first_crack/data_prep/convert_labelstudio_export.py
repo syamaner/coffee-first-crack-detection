@@ -185,7 +185,27 @@ def convert_task(
         raise RuntimeError(f"Failed to read duration for audio file: {local_audio_path}") from exc
 
     annotations: list[dict[str, Any]] = []
-    ann_list = task.get("annotations") or []
+    raw_annotations = task.get("annotations")
+    if manifest is not None:
+        if not isinstance(raw_annotations, list):
+            raise ValueError(f"MCP mic1 task has no annotation list: {original_name}")
+        submitted: list[dict[str, Any]] = []
+        for annotation in raw_annotations:
+            if not isinstance(annotation, dict):
+                raise ValueError(f"MCP mic1 task has a malformed annotation: {original_name}")
+            was_cancelled = annotation.get("was_cancelled", False)
+            if not isinstance(was_cancelled, bool):
+                raise ValueError(f"MCP mic1 task has invalid cancellation state: {original_name}")
+            if not was_cancelled:
+                submitted.append(annotation)
+        if len(submitted) != 1 or not isinstance(submitted[0].get("result"), list):
+            raise ValueError(
+                "MCP mic1 task must contain exactly one submitted, non-cancelled annotation "
+                f"object: {original_name}"
+            )
+        ann_list = submitted
+    else:
+        ann_list = raw_annotations or []
     for ann in ann_list:
         results = ann.get("result") or []
         for r in results:

@@ -27,6 +27,7 @@ from sklearn.model_selection import train_test_split
 
 logger = logging.getLogger(__name__)
 _CHUNK_LABELS = frozenset({"first_crack", "no_first_crack"})
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def extract_recording_stem(chunk_filename: str) -> str:
@@ -116,6 +117,7 @@ def group_chunks_by_pair(
             filename = record.get("chunk_filename")
             pair_id = record.get("pair_id")
             recording_id = record.get("recording_id")
+            source_audio_sha256 = record.get("source_audio_sha256")
             label = record.get("label")
             included = record.get("included")
             if (
@@ -125,6 +127,8 @@ def group_chunks_by_pair(
                 or not pair_id
                 or not isinstance(recording_id, str)
                 or not recording_id
+                or not isinstance(source_audio_sha256, str)
+                or _SHA256_RE.fullmatch(source_audio_sha256) is None
                 or not isinstance(label, str)
                 or not label
                 or not isinstance(included, bool)

@@ -376,9 +376,11 @@ Freeze this protocol **before running inference**:
 
 Do not reuse train, validation, or the existing 541-chunk test sessions. The
 evaluator rejects a holdout when either its `pair_id` or either source WAV
-checksum was already exposed to a split. It also requires
-`roast.recording.json:milestones.beans_added`; WAV time zero is never assumed to
-equal charge. Aborted recordings shorter than one detector window fail closed.
+checksum was already exposed to a split, including legacy recordings identified
+from the chunk manifest. It also requires authoritative recording-relative
+`beans_added` and `drop` milestones and verifies that drop occurs within both
+WAVs; WAV time zero is never assumed to equal charge. Aborted or incomplete
+recordings fail closed.
 
 The 16 Aug corpus does **not** contain a valid fresh holdout. Of 38 captured
 sessions, 34 are represented in the dataset splits. The remaining four are
@@ -396,6 +398,7 @@ label outcomes. A held-out `pair_id` reserves both mic1 and mic2 together.
 Store the cohort under `data/holdout/`, separate from `data/raw/`, and record its
 pair IDs and source checksums before evaluation. Every session must contain both
 microphones plus an authoritative recording-relative `beans_added`/T0 milestone.
+The authoritative `drop` milestone must also fall within both stream durations.
 Establish FC ground truth afterward by labelling mic1 in Label Studio, ideally
 without viewing model predictions; derive mic2 with the independent-clock
 uncertainty provenance described above. Never pass this tree to chunking,
@@ -422,10 +425,12 @@ venv/bin/python scripts/evaluate_mcp_heldout.py \
 
 Before the first model call, the command writes a sibling
 `*.protocol.json` lock containing the model/preprocessor hashes, frozen profile,
-pair IDs, WAV/label hashes, T0 offsets, and mic roles. Re-running the same output
-path with any change fails. Per roast and per mic, the report preserves:
+pair IDs, WAV/label hashes, T0/drop offsets, mic roles, and hashes for the split,
+chunk, dataset-capture, and holdout manifests used to prove non-exposure. The
+selected MCP checkout must be clean. Re-running the same output path with any
+change fails. Per roast and per mic, the report preserves:
 
-- pre-FC false notification, miss, and detection count (maximum one event);
+- pre-FC false notification, miss, and every emitted event count;
 - backdated event error: earliest qualifying window onset minus labelled FC;
 - operational confirmation latency: the fifth qualifying window end plus its
   measured inference time, minus labelled FC;
