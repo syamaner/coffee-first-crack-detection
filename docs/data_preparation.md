@@ -385,6 +385,22 @@ sessions, 34 are represented in the dataset splits. The remaining four are
 5.9–7.25 s aborted/fault captures with no `beans_added` milestone, so they are
 not full roasts and cannot produce even one 10 s detector window.
 
+#### Cohort allocation rule
+
+Assign future sessions to the final holdout **before model inference and before
+adding them to any development dataset**. Reserve 6–10 complete physical roasts,
+preferably 10 (20 WAVs), spanning at least three beans and varied ambient
+conditions. Selection may use capture metadata, but must not use model scores or
+label outcomes. A held-out `pair_id` reserves both mic1 and mic2 together.
+
+Store the cohort under `data/holdout/`, separate from `data/raw/`, and record its
+pair IDs and source checksums before evaluation. Every session must contain both
+microphones plus an authoritative recording-relative `beans_added`/T0 milestone.
+Establish FC ground truth afterward by labelling mic1 in Label Studio, ideally
+without viewing model predictions; derive mic2 with the independent-clock
+uncertainty provenance described above. Never pass this tree to chunking,
+splitting, training, validation, threshold selection, or model selection.
+
 After recording fresh sessions, stage them into a separate local holdout tree,
 label only their UUID-prefixed mic1 files in Label Studio, convert the export,
 and derive mic2 exactly as in Steps 1–4. Keep their pair IDs out of chunking,
