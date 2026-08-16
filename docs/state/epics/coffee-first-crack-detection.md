@@ -101,7 +101,7 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
   - Uses `mic['file']` from session JSON — handles `_partial` suffix and future naming variants
   - Slots between `convert_labelstudio_export.py` and `chunk_audio.py`; zero pipeline changes
   - 16 tests; Copilot review comments addressed (PR #48)
-- [ ] S22 [#68](https://github.com/syamaner/coffee-first-crack-detection/issues/68): Session-aware MCP corpus ingestion and leakage-free pair splitting
+- [x] S22 [#68](https://github.com/syamaner/coffee-first-crack-detection/issues/68): Session-aware MCP corpus ingestion and leakage-free pair splitting
   - UUID-safe staging for 38 independent-clock two-mic capture sessions
   - Human mic1 Label Studio boundary; deterministic mic2 derivation with uncertainty exclusions
   - Pair-level chunk provenance, splitting, and machine-checkable integrity report
@@ -112,19 +112,21 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 
 **Phase 7 complete.** S19 (#46) + S20 (#47) delivered in PR #48.
 
-**S22 implementation and leakage-free chunk evaluation complete; fresh full-roast holdout
-pending — draft PR review pending** (#68):
+**S22 implementation, mic1-safe retraining, and ONNX comparison complete; fresh full-roast
+holdout pending — PR review pending** (#68):
 - all 38 submitted mic1 tasks converted (18 with a region, 20 explicitly empty) and all 38
-  linked mic2 annotations derived with the independent-clock 3.5 s uncertainty policy
-- 5,612 usable chunks rebuilt from 52 contributing physical sessions / 89 streams; 48 derived
-  mic2 boundary-sensitive windows excluded (four retained MCP pairs are shorter than one 10 s
-  window and therefore contribute no chunks)
-- pair-level seed-42 split: train 4,307 / validation 764 / test 541 chunks, with empty pair-ID
-  intersections and byte-identical manifests across two rebuilds
-- leakage-free `baseline_v6_pair_aware` test: 96.5% accuracy / 0.832 F1 / 92.2% recall;
-  INT8: 97.0% / 0.852 F1 / 90.2% recall on the same 541 chunks
-- production Mac INT8 profile (8 threads): p50 202.7 ms / p95 204.9 ms / mean 202.9 ms
-  across the same 541 windows, passing the 500 ms target; quality unchanged
+  linked mic2 annotations retained with explicit unbounded historical alignment provenance
+- duration delta is diagnostic, not an alignment bound; every historical derived mic2 chunk is
+  excluded from training while all 38 pair identities and both streams remain auditable
+- corrected rebuild: 3,547 usable chunks from 52 physical sessions / 89 retained streams;
+  pair-level seed-42 split train 2,584 / validation 527 / test 436, with empty pair intersections
+- the earlier `baseline_v6_pair_aware` 5,612-chunk/541-test metrics and latency are withdrawn:
+  that candidate used mic2 labels that the final unbounded-alignment policy rejects
+- `baseline_v7_mic1_safe` PyTorch test: 95.87% accuracy / 0.8364 F1 / 92.0% recall /
+  76.67% precision / 0.9710 ROC-AUC on the 436 pair-safe chunks
+- 8-thread FP32 ONNX matches PyTorch quality (p50 384.5 ms); INT8: 96.56% accuracy /
+  0.8598 F1 / 92.0% recall / 80.7% precision / 0.9720 ROC-AUC (p50 205.0 ms), passing
+  the 500 ms live-profile latency target
 - exact-MCP full-recording replay harness added with immutable protocol locking, pair/checksum
   independence checks, authoritative recording-relative T0, mic1-primary/mic2-robustness
   reporting, and separate backdated-event versus operational-confirmation timing
@@ -237,9 +239,10 @@ python scripts/push_to_hub.py \
 | **baseline_v5 (partial freeze + aug)** | **98.0%** | **0.932** | **97.6%** | **1,435 chunks, 21 recs, 14M trainable, 303-sample test set, 1 FN / 5 FP, precision 89.1%, ROC-AUC 0.9979 (re-measured 12 Jul, #55)** |
 | ONNX FP32, baseline_v5 (Mac, 2 threads) | 98.0% | 0.932 | 97.6% | p50=429ms ✅ (re-benchmarked 12 Jul, #55 — matches AST/PyTorch exactly) |
 | ONNX INT8, baseline_v5 (Mac, 2 threads) | 98.3% | 0.943 | 97.6% | p50=216ms ✅ (re-benchmarked 12 Jul, #55 — 4 FP, marginally better precision than fp32) |
-| **baseline_v6_pair_aware (leakage-free)** | **96.5%** | **0.832** | **92.2%** | **5,612 chunks, 52 contributing physical sessions, 541-sample pair-safe test set, 4 FN / 15 FP, precision 75.8%, ROC-AUC 0.9756; not published** |
-| ONNX INT8, baseline_v6_pair_aware (Mac, 2 threads) | 97.0% | 0.852 | 90.2% | same 541-sample pair-safe test set, 5 FN / 11 FP, precision 80.7%, ROC-AUC 0.9764, p50=642ms; not published |
-| ONNX INT8, baseline_v6_pair_aware (Mac, 8 threads) | 97.0% | 0.852 | 90.2% | production agent/MCP thread setting on the same 541-window test: p50=202.7ms, p95=204.9ms, mean=202.9ms; not a fresh full-roast holdout; not published |
+| baseline_v6_pair_aware | withdrawn | withdrawn | withdrawn | Superseded 5,612-chunk candidate used historical derived mic2 labels that the final unbounded-alignment policy excludes; its 541-window quality and latency are not valid evidence for S22 |
+| **baseline_v7_mic1_safe (pair-safe)** | **95.87%** | **0.8364** | **92.0%** | **3,547 included chunks, 52 physical sessions / 89 streams, 436-window test, 4 FN / 14 FP, precision 76.67%, ROC-AUC 0.9710; no historical derived mic2 chunks; not published** |
+| ONNX FP32, baseline_v7_mic1_safe (Mac, 8 threads) | 95.87% | 0.8364 | 92.0% | same 436-window pair-safe test, p50=384.5ms / p95=404.0ms / mean=388.5ms; not a fresh full-roast holdout; not published |
+| ONNX INT8, baseline_v7_mic1_safe (Mac, 8 threads) | 96.56% | 0.8598 | 92.0% | same 436-window pair-safe test, 4 FN / 11 FP, precision 80.7%, ROC-AUC 0.9720, p50=205.0ms / p95=212.8ms / mean=206.3ms; not a fresh full-roast holdout; not published |
 | ONNX INT8 (RPi5, 4 threads, fan) | 93.3% | 0.933 | 95.5% | p50=2,070ms ⭐ recommended (pre-baseline_v5 ONNX validation, see note below) |
 | ONNX INT8 (RPi5, 2 threads) | 93.3% | 0.933 | 95.5% | p50=2,436ms ⚠️ thermal throttled (pre-baseline_v5 ONNX validation, see note below) |
 | ONNX INT8 (RPi5, 1 thread) | 93.3% | 0.933 | 95.5% | p50=4,441ms ⚠️ (pre-baseline_v5 ONNX validation, see note below) |

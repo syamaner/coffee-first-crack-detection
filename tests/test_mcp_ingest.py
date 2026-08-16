@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+import coffee_first_crack.data_prep.ingest_mcp_captures as ingestion
 from coffee_first_crack.data_prep.corpus_manifest import load_capture_manifest
 from coffee_first_crack.data_prep.ingest_mcp_captures import sha256_file, stage_captures
 
@@ -117,6 +118,38 @@ class TestMcpCaptureStaging:
 
         assert manifest["session_count"] == 1
         assert not output.exists()
+
+    def test_manifest_and_integrity_snapshot_share_one_validation_pass(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Manifest records cannot be separated from their source integrity snapshot."""
+        capture_root = tmp_path / "captures"
+        _make_session(capture_root, "3" * 32)
+        calls = 0
+        validate = ingestion._validate_session
+
+        def counted_validate(
+            session_dir: Path, staging_root: Path
+        ) -> tuple[ingestion.SessionRecord, list[ingestion.SourceFileState]]:
+            nonlocal calls
+            calls += 1
+            return validate(session_dir, staging_root)
+
+        monkeypatch.setattr(ingestion, "_validate_session", counted_validate)
+
+        manifest = stage_captures(capture_root, tmp_path / "staged", dry_run=True)
+
+        assert manifest["session_count"] == 1
+        assert calls == 1
+
+    def test_public_discovery_uses_validated_session_records(self, tmp_path: Path) -> None:
+        """The read-only discovery API retains the single-pass implementation."""
+        capture_root = tmp_path / "captures"
+        _make_session(capture_root, "4" * 32)
+
+        sessions = ingestion.discover_sessions(capture_root, tmp_path / "staged")
+
+        assert [session["pair_id"] for session in sessions] == ["4" * 32]
 
     def test_staging_inside_capture_root_is_rejected_without_writing(self, tmp_path: Path) -> None:
         capture_root = tmp_path / "captures"

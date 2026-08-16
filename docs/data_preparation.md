@@ -377,7 +377,10 @@ Freeze this protocol **before running inference**:
 - 5 qualifying windows within 20 s;
 - mic1 as the primary live-path result and mic2 as paired robustness evidence.
 
-Do not reuse train, validation, or the existing 541-chunk test sessions. The
+Do not reuse any train, validation, or test session. The superseded 541-window
+v6 test set is not valid final evidence because it included historical derived
+mic2 labels; the corrected v7 test set contains 436 windows, but it is still
+development evidence rather than a fresh full-roast holdout. The
 evaluator rejects a holdout when either its `pair_id` or either source WAV
 checksum was already exposed to a split, including legacy recordings identified
 from the chunk manifest. It also requires authoritative recording-relative
@@ -421,7 +424,7 @@ Then run:
 ```bash
 venv/bin/python scripts/evaluate_mcp_heldout.py \
   --mcp-src /Users/sertanyamaner/git/coffee-roaster-mcp/src \
-  --onnx-dir exports/onnx-baseline-v6-pair-aware/int8 \
+  --onnx-dir exports/onnx-baseline-v7-mic1-safe/int8 \
   --dataset-capture-manifest data/raw/mcp-captures/capture_manifest.json \
   --holdout-capture-manifest data/holdout/mcp-captures/capture_manifest.json \
   --labels-dir data/holdout/labels \
@@ -433,7 +436,7 @@ venv/bin/python scripts/evaluate_mcp_heldout.py \
   --pair-id <fresh-session-uuid-6> \
   --threads 8 --window-seconds 10 --overlap 0.7 \
   --threshold 0.6 --min-positive-windows 5 --confirmation-window 20 \
-  --output results/baseline_v6_pair_aware_fresh_mcp_holdout.json
+  --output results/baseline_v7_mic1_safe_fresh_mcp_holdout.json
 ```
 
 Before the first model call, the command writes a sibling
@@ -502,13 +505,19 @@ the streams share one physical `pair_id` and can never cross splits.
 | Multi-mic recordings | mic-1-new (fifine) | panama-hortigal-estate | 3 roasts | ✅ Annotated |
 | Multi-mic recordings | mic-2-new (audio-technica) | panama-hortigal-estate | 3 roasts | ✅ Annotated |
 
-**Totals** (baseline_v5, per `data/splits/split_report.md`): 21 recordings →
-1,435 chunks (223 first_crack / 1,212 no_first_crack).
+The MCP staging manifest retains all 38 physical capture sessions and all 76
+streams, including colliding original Colombia basenames. Four short/fault
+captures produce no 10 s windows. The corrected training corpus contains 3,547
+included chunks from 52 contributing physical sessions and 89 contributing
+streams: train 2,584, validation 527, and test 436. Every historical derived
+mic2 chunk is excluded because independent-clock alignment uncertainty is
+unbounded; the corresponding annotations and streams remain auditable.
 
-The committed baseline report currently groups by stream stem and leaks paired
-Panama roasts across splits (roast 1: mic1 train / mic2 test; roast 2: mic2
-validation / mic1 test). Treat baseline_v5 evaluation as potentially optimistic
-until rebuilt with this pair-aware pipeline.
+The old baseline_v5 split grouped by stream stem and leaked paired Panama roasts
+across splits (roast 1: mic1 train / mic2 test; roast 2: mic2 validation / mic1
+test). Its evaluation is potentially optimistic. The current split groups by
+physical `pair_id`, has empty train/validation/test pair intersections, and is
+deterministic for seed 42.
 
 ## Exact resume after the human export
 
@@ -518,18 +527,29 @@ training, evaluation, and ONNX comparison with:
 
 ```bash
 source venv/bin/activate
-./scripts/rebuild_and_train.sh baseline_v6_pair_aware
+./scripts/rebuild_and_train.sh baseline_v7_mic1_safe
 
 python -m coffee_first_crack.export_onnx \
-  --model-dir experiments/baseline_v6_pair_aware/checkpoint-best \
-  --output-dir exports/onnx-baseline-v6-pair-aware --quantize
+  --model-dir experiments/baseline_v7_mic1_safe/checkpoint-best \
+  --output-dir exports/onnx-baseline-v7-mic1-safe --quantize
 
 python scripts/evaluate_onnx.py \
-  --onnx-dir exports/onnx-baseline-v6-pair-aware/int8 \
+  --onnx-dir exports/onnx-baseline-v7-mic1-safe/fp32 \
   --test-dir data/splits/test \
-  --output results/baseline_v6_pair_aware_int8_eval.json
+  --output results/baseline_v7_mic1_safe_fp32_eval.json \
+  --threads 8
+
+python scripts/evaluate_onnx.py \
+  --onnx-dir exports/onnx-baseline-v7-mic1-safe/int8 \
+  --test-dir data/splits/test \
+  --output results/baseline_v7_mic1_safe_int8_eval.json \
+  --threads 8
 ```
 
-Compare the new PyTorch and INT8 metrics with baseline_v5, but do not publish a
-new model or replace production ONNX artifacts until the leakage-free evaluation
-is complete and reviewed.
+The completed local v7 candidate measured 95.87% accuracy / 0.8364 F1 / 92.0%
+FC recall for PyTorch and FP32 ONNX. INT8 measured 96.56% accuracy / 0.8598 F1 /
+92.0% FC recall, with 80.7% precision and 205.0 ms p50 inference latency at the
+production setting of eight threads. These are pair-safe chunk metrics, not a
+fresh full-roast deployment result. Do not publish the candidate or replace
+production ONNX artifacts until the frozen holdout protocol above is completed
+and reviewed.

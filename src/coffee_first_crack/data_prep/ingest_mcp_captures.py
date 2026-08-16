@@ -314,6 +314,47 @@ def _validate_session(
     return session_record, source_states
 
 
+def _discover_sessions_with_states(
+    capture_root: Path, staging_root: Path
+) -> tuple[list[SessionRecord], list[SourceFileState]]:
+    """Discover sessions and retain integrity states from the same validation pass.
+
+    Args:
+        capture_root: Immutable capture root.
+        staging_root: Destination root, used to detect collisions.
+
+    Returns:
+        Sorted validated session records and their exact source-file states.
+
+    Raises:
+        ValueError: If the root or any session is invalid.
+        FileExistsError: If a destination already exists.
+    """
+    if not capture_root.is_dir() or capture_root.is_symlink():
+        raise ValueError(f"Capture root must be a regular directory: {capture_root}")
+    session_dirs = sorted(path for path in capture_root.iterdir() if path.is_dir())
+    if not session_dirs:
+        raise ValueError(f"No capture sessions found in {capture_root}")
+
+    sessions: list[SessionRecord] = []
+    all_states: list[SourceFileState] = []
+    pair_ids: set[str] = set()
+    destinations: set[str] = set()
+    for session_dir in session_dirs:
+        session, states = _validate_session(session_dir, staging_root)
+        if session["pair_id"] in pair_ids:
+            raise ValueError(f"Duplicate pair_id: {session['pair_id']}")
+        pair_ids.add(session["pair_id"])
+        for stream in session["streams"]:
+            relative = stream["staged_relative_path"]
+            if relative in destinations or (staging_root / relative).exists():
+                raise FileExistsError(f"Duplicate staged destination: {relative}")
+            destinations.add(relative)
+        sessions.append(session)
+        all_states.extend(states)
+    return sessions, all_states
+
+
 def discover_sessions(capture_root: Path, staging_root: Path) -> list[SessionRecord]:
     """Discover and validate all MCP capture sessions.
 
@@ -328,26 +369,7 @@ def discover_sessions(capture_root: Path, staging_root: Path) -> list[SessionRec
         ValueError: If the root or any session is invalid.
         FileExistsError: If a destination already exists.
     """
-    if not capture_root.is_dir() or capture_root.is_symlink():
-        raise ValueError(f"Capture root must be a regular directory: {capture_root}")
-    session_dirs = sorted(path for path in capture_root.iterdir() if path.is_dir())
-    if not session_dirs:
-        raise ValueError(f"No capture sessions found in {capture_root}")
-
-    sessions: list[SessionRecord] = []
-    pair_ids: set[str] = set()
-    destinations: set[str] = set()
-    for session_dir in session_dirs:
-        session, _ = _validate_session(session_dir, staging_root)
-        if session["pair_id"] in pair_ids:
-            raise ValueError(f"Duplicate pair_id: {session['pair_id']}")
-        pair_ids.add(session["pair_id"])
-        for stream in session["streams"]:
-            relative = stream["staged_relative_path"]
-            if relative in destinations or (staging_root / relative).exists():
-                raise FileExistsError(f"Duplicate staged destination: {relative}")
-            destinations.add(relative)
-        sessions.append(session)
+    sessions, _ = _discover_sessions_with_states(capture_root, staging_root)
     return sessions
 
 
@@ -380,11 +402,7 @@ def stage_captures(
         raise ValueError(f"Staging root must be outside the immutable capture root: {staging_root}")
     if staging_root.exists() and any(staging_root.iterdir()):
         raise FileExistsError(f"Staging root must be absent or empty: {staging_root}")
-    sessions = discover_sessions(capture_root, staging_root)
-    all_states: list[SourceFileState] = []
-    for session_dir in sorted(path for path in capture_root.iterdir() if path.is_dir()):
-        _, states = _validate_session(session_dir, staging_root)
-        all_states.extend(states)
+    sessions, all_states = _discover_sessions_with_states(capture_root, staging_root)
 
     max_delta = max(session["observed_duration_delta_seconds"] for session in sessions)
     manifest = CaptureManifest(

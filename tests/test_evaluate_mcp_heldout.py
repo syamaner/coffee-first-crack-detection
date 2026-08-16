@@ -575,6 +575,105 @@ def test_input_snapshot_rejects_missing_evidence(tmp_path: Path) -> None:
         replay._snapshot_inputs({"missing": tmp_path / "missing.json"})
 
 
+def test_evaluate_reverifies_model_bundle_around_backend_and_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The frozen model and preprocessor are checked at all three race boundaries."""
+    evidence_paths = {
+        name: tmp_path / f"{name}.json"
+        for name in (
+            "split_integrity",
+            "chunk_manifest",
+            "dataset_capture_manifest",
+            "holdout_capture_manifest",
+        )
+    }
+    for path in evidence_paths.values():
+        path.write_text("{}", encoding="utf-8")
+    model_path = tmp_path / "model.onnx"
+    preprocessor_path = tmp_path / "preprocessor_config.json"
+    model_path.write_bytes(b"frozen-model")
+    preprocessor_path.write_text("{}", encoding="utf-8")
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"held-out-audio")
+    label_path = tmp_path / "label.json"
+    label_path.write_text("{}", encoding="utf-8")
+    recording = replay.HeldOutRecording(
+        pair_id="fresh-pair",
+        origin="bean-a",
+        recording_id="fresh-pair__mic1",
+        audio_path=audio_path,
+        label_path=label_path,
+        mic_num=1,
+        mic_label="primary",
+        source_sha256=_sha256(audio_path),
+        t0_offset_sec=0.0,
+        drop_offset_sec=10.0,
+        region=None,
+    )
+    artifacts = SimpleNamespace(
+        onnx_model=SimpleNamespace(local_path=str(model_path)),
+        feature_extractor_config=SimpleNamespace(local_path=str(preprocessor_path)),
+    )
+    mcp = {
+        "FirstCrackConfig": lambda **kwargs: kwargs,
+        "build_released_onnx_first_crack_detector_backend": lambda *_args: object(),
+    }
+    monkeypatch.setattr(replay, "_git_head", lambda _path: "abc123")
+    monkeypatch.setattr(replay, "_load_mcp", lambda _path: mcp)
+    monkeypatch.setattr(replay, "discover_heldout_recordings", lambda **_kwargs: [recording])
+    monkeypatch.setattr(replay, "_resolved_artifacts", lambda *_args, **_kwargs: artifacts)
+    monkeypatch.setattr(
+        replay,
+        "_prepare_audio",
+        lambda _recording, _temp_dir, source_snapshot: (source_snapshot, False),
+    )
+    monkeypatch.setattr(
+        replay,
+        "_evaluate_recording",
+        lambda **_kwargs: {
+            "outcome": "true_negative",
+            "detected_sec": None,
+            "confirmed_sec": None,
+            "max_processed_confidence": 0.0,
+        },
+    )
+    monkeypatch.setattr(replay, "_aggregate", lambda _results: {})
+    monkeypatch.setattr(replay, "_write_markdown", lambda *_args: None)
+    verify = replay._verify_input_snapshot
+    artifact_verifications = 0
+
+    def counted_verify(paths: dict[str, Path], expected: dict[str, dict[str, str]]) -> None:
+        nonlocal artifact_verifications
+        if "onnx_model" in paths:
+            artifact_verifications += 1
+        verify(paths, expected)
+
+    monkeypatch.setattr(replay, "_verify_input_snapshot", counted_verify)
+    args = SimpleNamespace(
+        **evidence_paths,
+        mcp_src=tmp_path / "mcp" / "src",
+        onnx_dir=tmp_path,
+        repo_id=None,
+        revision=None,
+        labels_dir=[tmp_path],
+        pair_id=["fresh-pair"],
+        window_seconds=10.0,
+        overlap=0.7,
+        output=tmp_path / "report.json",
+        threads=8,
+        threshold=0.6,
+        min_positive_windows=5,
+        confirmation_window=20.0,
+    )
+
+    report = replay.evaluate(args)
+
+    assert artifact_verifications == 3
+    assert report["model"]["onnx_sha256"] == _sha256(model_path)
+    assert report["model"]["preprocessor_sha256"] == _sha256(preprocessor_path)
+
+
 def test_audio_snapshot_remains_frozen_when_source_changes(tmp_path: Path) -> None:
     """Replay reads evaluator-owned bytes, not a mutable source path."""
     fixture = _discovery_fixture(tmp_path)

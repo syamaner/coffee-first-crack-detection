@@ -1017,6 +1017,12 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         revision=args.revision,
     )
     model_path = Path(artifacts.onnx_model.local_path)
+    preprocessor_path = Path(artifacts.feature_extractor_config.local_path)
+    artifact_paths = {
+        "onnx_model": model_path,
+        "preprocessor_config": preprocessor_path,
+    }
+    artifact_snapshot = _snapshot_inputs(artifact_paths)
     hop_seconds = args.window_seconds * (1.0 - args.overlap)
     protocol = {
         "schema_version": 1,
@@ -1027,8 +1033,8 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "repo_id": args.repo_id,
             "revision": args.revision,
             "precision": "int8",
-            "onnx_sha256": _sha256(model_path),
-            "preprocessor_sha256": _sha256(Path(artifacts.feature_extractor_config.local_path)),
+            "onnx_sha256": artifact_snapshot["onnx_model"]["sha256"],
+            "preprocessor_sha256": artifact_snapshot["preprocessor_config"]["sha256"],
         },
         "profile": {
             "sample_rate": SAMPLE_RATE,
@@ -1070,7 +1076,9 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         confirmation_window_seconds=args.confirmation_window,
         allow_manual_override=True,
     )
+    _verify_input_snapshot(artifact_paths, artifact_snapshot)
     backend = mcp["build_released_onnx_first_crack_detector_backend"](first_crack_config, artifacts)
+    _verify_input_snapshot(artifact_paths, artifact_snapshot)
 
     results: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="mcp-heldout-replay-") as temp:
@@ -1105,6 +1113,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             )
 
     _verify_input_snapshot(evidence_paths, evidence_snapshot)
+    _verify_input_snapshot(artifact_paths, artifact_snapshot)
     if _sha256(evaluator_path) != evaluator_sha256:
         raise RuntimeError("Evaluator script changed during replay")
 
@@ -1135,8 +1144,9 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "revision": args.revision,
             "precision": "int8",
             "onnx_path": str(model_path.resolve()),
-            "onnx_sha256": _sha256(model_path),
-            "preprocessor_path": str(Path(artifacts.feature_extractor_config.local_path)),
+            "onnx_sha256": artifact_snapshot["onnx_model"]["sha256"],
+            "preprocessor_path": str(preprocessor_path.resolve()),
+            "preprocessor_sha256": artifact_snapshot["preprocessor_config"]["sha256"],
         },
         "profile": {
             "sample_rate": SAMPLE_RATE,

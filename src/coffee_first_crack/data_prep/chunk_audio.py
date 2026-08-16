@@ -343,6 +343,20 @@ def process_recording(
         and provenance.get("annotation_source") == "derived_from_paired_mic"
     ):
         derived = True
+        derived_from = provenance.get("derived_from")
+        expected_target_prefix = f"{resolved_pair_id}__mic2-"
+        expected_source_prefix = f"{resolved_pair_id}__mic1-"
+        if (
+            resolved_mic_num != 2
+            or ann.get("pair_id") != resolved_pair_id
+            or provenance.get("pair_id") != resolved_pair_id
+            or not isinstance(derived_from, str)
+            or not Path(derived_from).name.startswith(expected_source_prefix)
+            or not Path(audio_file).name.startswith(expected_target_prefix)
+        ):
+            raise ValueError(
+                f"Derived annotation pair or stream identity mismatch: {annotation_path}"
+            )
         training_policy = provenance.get("training_policy")
         if training_policy == "exclude_all_derived_mic2_without_verified_alignment":
             if (

@@ -37,17 +37,19 @@ def test_derived_boundary_windows_are_reported_and_not_written(
 ) -> None:
     audio_root = tmp_path / "audio"
     audio_root.mkdir()
-    (audio_root / "mic2.wav").write_bytes(b"stub")
+    (audio_root / "pair-1__mic2-roast.wav").write_bytes(b"stub")
     annotation_path = tmp_path / "mic2.json"
     annotation_path.write_text(
         json.dumps(
             {
-                "audio_file": "mic2.wav",
+                "audio_file": "pair-1__mic2-roast.wav",
                 "pair_id": "pair-1",
                 "mic_num": 2,
                 "annotations": [{"start_time": 20.0, "end_time": 50.0, "label": "first_crack"}],
                 "provenance": {
                     "annotation_source": "derived_from_paired_mic",
+                    "pair_id": "pair-1",
+                    "derived_from": "mic1/pair-1__mic1-roast.wav",
                     "derivation_method": "verified_audio_alignment",
                     "alignment_uncertainty_seconds": 3.5,
                     "training_policy": "exclude_windows_intersecting_boundary_guard_band",
@@ -88,17 +90,19 @@ def test_unaligned_derived_mic2_excludes_every_chunk(
     """Historical timestamps remain auditable but never become training ground truth."""
     audio_root = tmp_path / "audio"
     audio_root.mkdir()
-    (audio_root / "mic2.wav").write_bytes(b"stub")
+    (audio_root / "pair-1__mic2-roast.wav").write_bytes(b"stub")
     annotation_path = tmp_path / "mic2.json"
     annotation_path.write_text(
         json.dumps(
             {
-                "audio_file": "mic2.wav",
+                "audio_file": "pair-1__mic2-roast.wav",
                 "pair_id": "pair-1",
                 "mic_num": 2,
                 "annotations": [{"start_time": 20.0, "end_time": 50.0, "label": "first_crack"}],
                 "provenance": {
                     "annotation_source": "derived_from_paired_mic",
+                    "pair_id": "pair-1",
+                    "derived_from": "mic1/pair-1__mic1-roast.wav",
                     "alignment_uncertainty_seconds": None,
                     "alignment_uncertainty_status": (
                         "unbounded_historical_missing_stream_start_offsets"
@@ -133,6 +137,66 @@ def test_unaligned_derived_mic2_excludes_every_chunk(
     assert {record["exclusion_reason"] for record in records} == {
         "derived_mic2_without_verified_alignment"
     }
+
+
+@pytest.mark.parametrize(
+    ("annotation_pair", "provenance_pair", "derived_from", "audio_file"),
+    [
+        ("pair-b", "pair-a", "mic1/pair-a__mic1-roast.wav", "pair-b__mic2-roast.wav"),
+        ("pair-b", "pair-b", "mic1/pair-a__mic1-roast.wav", "pair-b__mic2-roast.wav"),
+        ("pair-b", "pair-b", "mic1/pair-b__mic1-roast.wav", "pair-a__mic2-roast.wav"),
+    ],
+)
+def test_derived_mic2_identity_cannot_cross_pairs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    annotation_pair: str,
+    provenance_pair: str,
+    derived_from: str,
+    audio_file: str,
+) -> None:
+    """Pair, source-mic, and target-mic identities must describe one roast."""
+    audio_root = tmp_path / "audio"
+    audio_root.mkdir()
+    (audio_root / audio_file).write_bytes(b"stub")
+    annotation_path = tmp_path / "mic2.json"
+    annotation_path.write_text(
+        json.dumps(
+            {
+                "audio_file": audio_file,
+                "pair_id": annotation_pair,
+                "mic_num": 2,
+                "annotations": [],
+                "provenance": {
+                    "annotation_source": "derived_from_paired_mic",
+                    "pair_id": provenance_pair,
+                    "derived_from": derived_from,
+                    "alignment_uncertainty_seconds": None,
+                    "alignment_uncertainty_status": (
+                        "unbounded_historical_missing_stream_start_offsets"
+                    ),
+                    "training_policy": ("exclude_all_derived_mic2_without_verified_alignment"),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        chunking.librosa,
+        "load",
+        lambda *_args, **_kwargs: (np.zeros(20 * 100, dtype=np.float32), 100),
+    )
+
+    with pytest.raises(ValueError, match="pair or stream identity mismatch"):
+        process_recording(
+            annotation_path,
+            audio_root,
+            tmp_path / "processed",
+            window_size=10.0,
+            sample_rate=100,
+            pair_id="pair-b",
+            mic_num=2,
+        )
 
 
 def test_paired_mic2_without_derived_provenance_fails_closed(
@@ -177,6 +241,8 @@ def test_paired_mic2_without_derived_provenance_fails_closed(
         (
             {
                 "annotation_source": "derived_from_paired_mic",
+                "pair_id": "pair-1",
+                "derived_from": "mic1/pair-1__mic1-roast.wav",
                 "alignment_uncertainty_seconds": 1.0,
                 "alignment_uncertainty_status": (
                     "unbounded_historical_missing_stream_start_offsets"
@@ -188,6 +254,8 @@ def test_paired_mic2_without_derived_provenance_fails_closed(
         (
             {
                 "annotation_source": "derived_from_paired_mic",
+                "pair_id": "pair-1",
+                "derived_from": "mic1/pair-1__mic1-roast.wav",
                 "derivation_method": "copy_timestamps_for_audit_only",
                 "alignment_uncertainty_seconds": 1.0,
                 "training_policy": "exclude_windows_intersecting_boundary_guard_band",
@@ -205,12 +273,12 @@ def test_inconsistent_derived_alignment_provenance_fails_closed(
     """Neither a false finite bound nor an unverified guard band is accepted."""
     audio_root = tmp_path / "audio"
     audio_root.mkdir()
-    (audio_root / "mic2.wav").write_bytes(b"stub")
+    (audio_root / "pair-1__mic2-roast.wav").write_bytes(b"stub")
     annotation_path = tmp_path / "mic2.json"
     annotation_path.write_text(
         json.dumps(
             {
-                "audio_file": "mic2.wav",
+                "audio_file": "pair-1__mic2-roast.wav",
                 "pair_id": "pair-1",
                 "mic_num": 2,
                 "annotations": [],

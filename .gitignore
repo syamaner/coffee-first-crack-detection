@@ -217,6 +217,7 @@ exports/
 results/*.log
 # Local leakage-free evaluation outputs are reported in the PR, not committed.
 results/baseline_v6_pair_aware_*
+results/baseline_v7_mic1_safe_*
 venv/
 *.onnx
 *.safetensors
