@@ -4,7 +4,7 @@
 
 | Epic | GitHub Issue | Status | Phase |
 |------|-------------|--------|-------|
-| Coffee First Crack Detection — HuggingFace Model Repository | [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1) | 🔄 Active | Phase 7 delivered; baseline_v5 published to HF Hub (2026-04-12) |
+| Coffee First Crack Detection — HuggingFace Model Repository | [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1) | 🔄 Active | S22 pair-safe data pipeline at human Label Studio handoff (2026-08-16) |
 
 ## Links
 - GitHub Repo: https://github.com/syamaner/coffee-first-crack-detection

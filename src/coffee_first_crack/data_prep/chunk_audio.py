@@ -25,6 +25,8 @@ import librosa
 import numpy as np
 import soundfile as sf
 
+from coffee_first_crack.data_prep.corpus_manifest import resolve_within
+
 # ---------------------------------------------------------------------------
 # Core logic
 # ---------------------------------------------------------------------------
@@ -94,6 +96,46 @@ def label_window(
     if overlap >= overlap_threshold * window_duration:
         return "first_crack"
     return "no_first_crack"
+
+
+def intersects_uncertain_boundary(
+    window_start: float,
+    window_end: float,
+    regions: list[dict[str, Any]],
+    uncertainty_seconds: float,
+) -> bool:
+    """Return whether a window touches any uncertain first-crack boundary.
+
+    Derived MCP annotations copy mic1 timestamps onto an independently clocked
+    mic2 stream. A derived training window is excluded whenever it intersects
+    the guard band around either annotation boundary, so a boundary-sensitive
+    class is never silently treated as ground truth.
+
+    Args:
+        window_start: Window start in seconds.
+        window_end: Window end in seconds.
+        regions: Annotation regions.
+        uncertainty_seconds: Symmetric boundary guard in seconds.
+
+    Returns:
+        True when the window must be excluded.
+
+    Raises:
+        ValueError: If the uncertainty is negative.
+    """
+    if uncertainty_seconds < 0:
+        raise ValueError("uncertainty_seconds must be non-negative")
+    if uncertainty_seconds == 0:
+        return False
+    for region in regions:
+        if region.get("label") != "first_crack":
+            continue
+        for boundary in (float(region["start_time"]), float(region["end_time"])):
+            guard_start = boundary - uncertainty_seconds
+            guard_end = boundary + uncertainty_seconds
+            if window_start < guard_end and window_end > guard_start:
+                return True
+    return False
 
 
 def chunk_recording(
@@ -206,6 +248,9 @@ def process_recording(
     hop_size: float | None = None,
     overlap_threshold: float = 0.5,
     sample_rate: int = 44100,
+    pair_id: str | None = None,
+    mic_num: int | None = None,
+    chunk_manifest_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, int]:
     """Process a single recording into chunked WAV files.
 
@@ -218,17 +263,22 @@ def process_recording(
         hop_size: Hop between windows in seconds.
         overlap_threshold: Fraction threshold for ``first_crack`` labelling.
         sample_rate: Sample rate to load audio at.
+        pair_id: Physical-session identity for chunk provenance.
+        mic_num: Microphone number when known.
+        chunk_manifest_records: Optional list extended with included and
+            uncertainty-excluded chunk records.
 
     Returns:
         Dict with counts ``{"first_crack": N, "no_first_crack": M}``.
     """
     ann = load_annotation(annotation_path)
     audio_file = ann["audio_file"]
-    audio_path = audio_dir / audio_file
+    if not isinstance(audio_file, str):
+        raise ValueError(f"Annotation audio_file must be a string: {annotation_path}")
+    audio_path = resolve_within(audio_dir, audio_file)
 
     if not audio_path.exists():
-        print(f"⚠️  Audio file not found: {audio_path}")
-        return {"first_crack": 0, "no_first_crack": 0}
+        raise FileNotFoundError(f"Annotated audio file not found: {audio_path}")
 
     print(f"\n📁 Processing: {audio_file}")
     audio, loaded_sr = librosa.load(str(audio_path), sr=sample_rate, mono=True)
@@ -240,21 +290,130 @@ def process_recording(
         audio, sr, ann["annotations"], window_size, hop_size, overlap_threshold
     )
 
-    counts: dict[str, int] = {"first_crack": 0, "no_first_crack": 0}
+    counts: dict[str, int] = {
+        "first_crack": 0,
+        "no_first_crack": 0,
+        "excluded_uncertain": 0,
+    }
     stem = Path(audio_file).stem
+    provenance = ann.get("provenance")
+    uncertainty = 0.0
+    derived = False
+    if (
+        isinstance(provenance, dict)
+        and provenance.get("annotation_source") == "derived_from_paired_mic"
+    ):
+        derived = True
+        raw_uncertainty = provenance.get("alignment_uncertainty_seconds")
+        if not isinstance(raw_uncertainty, (int, float)) or isinstance(raw_uncertainty, bool):
+            raise ValueError(
+                f"Derived annotation lacks numeric alignment uncertainty: {annotation_path}"
+            )
+        uncertainty = float(raw_uncertainty)
+        if provenance.get("training_policy") != (
+            "exclude_windows_intersecting_boundary_guard_band"
+        ):
+            raise ValueError(
+                f"Derived annotation lacks the required uncertainty policy: {annotation_path}"
+            )
+
+    resolved_pair_id = pair_id or ann.get("pair_id")
+    if not isinstance(resolved_pair_id, str) or not resolved_pair_id:
+        resolved_pair_id = f"single:{stem}"
+    resolved_mic_num = mic_num if mic_num is not None else ann.get("mic_num")
+    if resolved_mic_num is not None and not isinstance(resolved_mic_num, int):
+        raise ValueError(f"Annotation mic_num must be an integer: {annotation_path}")
 
     for chunk in chunks:
         lbl: str = chunk["label"]
         start: float = chunk["start_sec"]
         filename = f"{stem}_w{start:06.1f}.wav"
+        excluded = derived and intersects_uncertain_boundary(
+            start,
+            float(chunk["end_sec"]),
+            ann["annotations"],
+            uncertainty,
+        )
+        manifest_record: dict[str, Any] = {
+            "chunk_filename": filename,
+            "recording_id": stem,
+            "pair_id": resolved_pair_id,
+            "mic_num": resolved_mic_num,
+            "label": lbl,
+            "start_sec": start,
+            "end_sec": float(chunk["end_sec"]),
+            "included": not excluded,
+            "annotation_source": (
+                provenance.get("annotation_source") if isinstance(provenance, dict) else "legacy"
+            ),
+        }
+        if excluded:
+            manifest_record["exclusion_reason"] = "derived_boundary_alignment_uncertainty"
+            manifest_record["alignment_uncertainty_seconds"] = uncertainty
+            counts["excluded_uncertain"] += 1
+            if chunk_manifest_records is not None:
+                chunk_manifest_records.append(manifest_record)
+            continue
         out_path = output_dir / lbl / filename
+        if out_path.exists():
+            raise FileExistsError(f"Refusing to overwrite duplicate chunk destination: {out_path}")
         save_chunk(chunk["samples"], out_path, sr)
         counts[lbl] = counts.get(lbl, 0) + 1
+        if chunk_manifest_records is not None:
+            chunk_manifest_records.append(manifest_record)
 
     print(f"   ✅ Created {len(chunks)} chunks")
     print(f"      - first_crack: {counts['first_crack']}")
     print(f"      - no_first_crack: {counts['no_first_crack']}")
+    if counts["excluded_uncertain"]:
+        print(f"      - excluded_uncertain: {counts['excluded_uncertain']}")
     return counts
+
+
+def build_legacy_pair_index(session_dir: Path) -> dict[str, tuple[str, int]]:
+    """Map legacy session WAV basenames to deterministic physical pair IDs.
+
+    This path is for `record_mics.py` Aggregate Device sessions already stored
+    in ``data/raw`` (including the Panama baseline recordings). MCP staging uses
+    explicit UUID pair IDs in its annotations instead.
+
+    Args:
+        session_dir: Directory containing legacy ``*-session.json`` files.
+
+    Returns:
+        Mapping from WAV basename to ``(pair_id, mic_num)``.
+
+    Raises:
+        ValueError: If a session sidecar is malformed or ambiguous.
+    """
+    index: dict[str, tuple[str, int]] = {}
+    if not session_dir.exists():
+        return index
+    for path in sorted(session_dir.glob("*-session.json")):
+        with path.open("r", encoding="utf-8") as handle:
+            session: Any = json.load(handle)
+        if not isinstance(session, dict) or not isinstance(session.get("mics"), list):
+            raise ValueError(f"Malformed legacy session sidecar: {path}")
+        pair_id = f"legacy:{path.name.removesuffix('-session.json')}"
+        seen_mics: set[int] = set()
+        for mic in session["mics"]:
+            if not isinstance(mic, dict):
+                raise ValueError(f"Malformed mic entry in {path}")
+            mic_num = mic.get("mic_num")
+            filename = mic.get("file")
+            if (
+                not isinstance(mic_num, int)
+                or isinstance(mic_num, bool)
+                or mic_num < 1
+                or not isinstance(filename, str)
+                or Path(filename).name != filename
+            ):
+                raise ValueError(f"Malformed mic identity in {path}")
+            if mic_num in seen_mics or filename in index:
+                raise ValueError(f"Duplicate legacy pair mapping in {path}: {filename}")
+            seen_mics.add(mic_num)
+            index[filename] = (pair_id, mic_num)
+    return index
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +441,7 @@ def generate_summary(
     """
     total_fc = sum(c.get("first_crack", 0) for c in all_counts)
     total_nfc = sum(c.get("no_first_crack", 0) for c in all_counts)
+    total_excluded = sum(c.get("excluded_uncertain", 0) for c in all_counts)
     total = total_fc + total_nfc
 
     lines = [
@@ -301,6 +461,7 @@ def generate_summary(
         f"- **Total chunks created**: {total}",
         f"  - first_crack: {total_fc}",
         f"  - no_first_crack: {total_nfc}",
+        f"- **Derived mic2 chunks excluded for alignment uncertainty**: {total_excluded}",
         "",
         "## Class Balance",
         "",
@@ -381,16 +542,23 @@ def main() -> None:
         default=44100,
         help="Sample rate for loading audio (default: 44100)",
     )
+    parser.add_argument(
+        "--session-dir",
+        type=Path,
+        default=Path("data/raw"),
+        help="Legacy session-sidecar directory for physical pair resolution",
+    )
     args = parser.parse_args()
 
     hop = args.hop_size if args.hop_size is not None else args.window_size
 
     # Find per-file annotation JSONs (exclude Label Studio exports / backups)
-    candidates = sorted(args.labels_dir.glob("*.json"))
+    candidates = sorted(args.labels_dir.rglob("*.json"))
     annotation_files = [
         p
         for p in candidates
-        if not (p.name.startswith("project-") or p.name.startswith("labelstudio-export-"))
+        if "bak" not in p.relative_to(args.labels_dir).parts
+        and not (p.name.startswith("project-") or p.name.startswith("labelstudio-export-"))
     ]
 
     if not annotation_files:
@@ -409,7 +577,14 @@ def main() -> None:
     print(f"Sample rate:      {args.sample_rate}Hz")
 
     all_counts: list[dict[str, int]] = []
+    chunk_manifest_records: list[dict[str, Any]] = []
+    legacy_pairs = build_legacy_pair_index(args.session_dir)
     for ann_file in annotation_files:
+        ann = load_annotation(ann_file)
+        audio_file = ann.get("audio_file")
+        legacy_identity = (
+            legacy_pairs.get(Path(audio_file).name) if isinstance(audio_file, str) else None
+        )
         counts = process_recording(
             ann_file,
             args.audio_dir,
@@ -418,8 +593,17 @@ def main() -> None:
             hop_size=hop,
             overlap_threshold=args.overlap_threshold,
             sample_rate=args.sample_rate,
+            pair_id=legacy_identity[0] if legacy_identity else None,
+            mic_num=legacy_identity[1] if legacy_identity else None,
+            chunk_manifest_records=chunk_manifest_records,
         )
         all_counts.append(counts)
+
+    manifest_path = args.output_dir / "chunk_manifest.jsonl"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with manifest_path.open("w", encoding="utf-8") as handle:
+        for record in chunk_manifest_records:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
 
     generate_summary(
         args.output_dir,

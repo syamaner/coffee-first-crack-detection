@@ -36,12 +36,25 @@ pip install -e ".[all]"
 
 ### Data preparation
 ```bash
+# Validate and stage MCP sessions without flattening pair identity
+python -m coffee_first_crack.data_prep.ingest_mcp_captures \
+  --capture-root /Users/sertanyamaner/roasts/captures \
+  --output data/raw/mcp-captures --dry-run
+
 # Generate recordings manifest from data/raw/
 python -c "from coffee_first_crack.dataset import generate_recordings_manifest; generate_recordings_manifest('data/raw', 'data/recordings.csv')"
 
 # Convert Label Studio JSON export to per-file annotations
 python -m coffee_first_crack.data_prep.convert_labelstudio_export \
-  --input data/labels/export.json --output data/labels --data-root data/raw
+  --input data/labels/mcp/labelstudio-export.json \
+  --output data/labels/mcp --data-root data/raw \
+  --manifest data/raw/mcp-captures/capture_manifest.json
+
+# Derive uncertainty-audited mic2 annotations from human mic1 labels
+python scripts/propagate_annotations.py \
+  --manifest data/raw/mcp-captures/capture_manifest.json \
+  --staging-root data/raw/mcp-captures --audio-root data/raw \
+  --labels-dir data/labels/mcp
 
 # Chunk annotated audio into 10s windows
 python -m coffee_first_crack.data_prep.chunk_audio \
@@ -184,9 +197,11 @@ src/coffee_first_crack/
     device.py          — get_device() MPS→CUDA→CPU, get_dataloader_kwargs()
     metrics.py         — MetricsCalculator (accuracy, F1, ROC-AUC, confusion matrix)
   data_prep/
+    ingest_mcp_captures.py         — UUID-safe MCP corpus staging + integrity manifest
+    corpus_manifest.py             — typed manifest loading + safe path resolution
     convert_labelstudio_export.py  — Label Studio JSON → per-file annotation JSON
     chunk_audio.py                 — annotated WAV → 10s chunks under data/processed/
-    dataset_splitter.py            — stratified train/val/test split
+    dataset_splitter.py            — physical-pair-level train/val/test split
 scripts/
   evaluate_onnx.py     — ONNX-only test-set evaluation (no PyTorch inference dep)
   benchmark_onnx_pi.py — ONNX-only latency benchmark (dummy audio, no I/O variance)

@@ -2,7 +2,7 @@
 
 **GitHub Issue**: [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1)
 **Status**: 🔄 Active — Phase 7 complete (S19 + S20 delivered); recording data collection in progress
-**Last Updated**: 2026-04-11
+**Last Updated**: 2026-08-16
 
 ## Objective
 Create a standalone, HuggingFace-publishable repository for training, evaluating, and publishing the coffee first crack audio detection model. Extracted from the `coffee-roasting` monorepo. Targets M3+ Mac (MPS), RTX 4090 (CUDA), and Raspberry Pi 5 (ONNX/CPU).
@@ -101,12 +101,21 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
   - Uses `mic['file']` from session JSON — handles `_partial` suffix and future naming variants
   - Slots between `convert_labelstudio_export.py` and `chunk_audio.py`; zero pipeline changes
   - 16 tests; Copilot review comments addressed (PR #48)
+- [ ] S22 [#68](https://github.com/syamaner/coffee-first-crack-detection/issues/68): Session-aware MCP corpus ingestion and leakage-free pair splitting
+  - UUID-safe staging for 38 independent-clock two-mic capture sessions
+  - Human mic1 Label Studio boundary; deterministic mic2 derivation with uncertainty exclusions
+  - Pair-level chunk provenance, splitting, and machine-checkable integrity report
 
 ---
 
 ## Active Context
 
 **Phase 7 complete.** S19 (#46) + S20 (#47) delivered in PR #48.
+
+**S22 in progress — human annotation handoff** (#68):
+- 38 capture UUIDs and 76 streams validated and staged without flattening
+- mic1-only Label Studio task directory prepared with 38 files
+- pair-aware pipeline hardening is implemented; rebuild/training awaits the human JSON export
 
 **S19 — Multi-mic recording** (`scripts/record_mics.py`):
 - `RoastMics` CoreAudio Aggregate Device: FIFINE K669B (ch 0, Primary Clock) + ATR2100x (ch 1, Drift Correction)
@@ -130,7 +139,8 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 
 **Dataset v3**: 1,435 fixed 10s chunks from 21 recordings (9 legacy + 6 mic2-amplified + 3 mic1-panama + 3 mic2-panama)
 - 223 first_crack (~16%) / 1,212 no_first_crack (~84%)
-- Recording-level splitting prevents data leakage
+- The baseline_v5 split grouped by stream/recording stem and leaks paired Panama roasts;
+  S22 replaces it with physical-pair splitting before the next evaluation
 - 6 older mic2 recordings amplified (+11–13 dB) to match calibrated gain, re-annotated
 - 3 panama roasts recorded with dual mics (FIFINE + Audio-Technica), separate hardware
 
