@@ -97,6 +97,39 @@ def test_manifest_conversion_preserves_human_pair_provenance(
     assert converted["provenance"]["annotation_source"] == "human_label_studio"
 
 
+@pytest.mark.parametrize(("start", "end"), [(float("nan"), 50.0), (20.0, float("nan"))])
+def test_manifest_conversion_rejects_non_finite_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    start: float,
+    end: float,
+) -> None:
+    """Malformed Label Studio numbers cannot silently invert whole-recording labels."""
+    staging_root = tmp_path / "mcp"
+    manifest = _manifest(staging_root)
+    mic1 = manifest["sessions"][0]["streams"][0]
+    audio_path = staging_root / mic1["staged_relative_path"]
+    audio_path.parent.mkdir(parents=True)
+    audio_path.write_bytes(b"stub")
+    monkeypatch.setattr(conversion.librosa, "get_duration", lambda **_: 100.0)
+    task = {
+        "file_upload": f"deadbeef-{audio_path.name}",
+        "annotations": [
+            {
+                "result": [
+                    {
+                        "type": "labels",
+                        "value": {"start": start, "end": end, "labels": ["first_crack"]},
+                    }
+                ]
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError, match="invalid first_crack boundary"):
+        conversion.convert_task(task, tmp_path, manifest)
+
+
 def test_manifest_conversion_resolves_label_studio_truncated_upload(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -265,11 +298,14 @@ def test_manifest_derivation_records_uncertainty_and_pair_identity(tmp_path: Pat
     assert derived["pair_id"] == session["pair_id"]
     assert derived["mic_num"] == 2
     assert derived["provenance"]["derived_from"] == primary["staged_relative_path"]
-    assert derived["provenance"]["alignment_uncertainty_seconds"] == 3.5
+    assert derived["provenance"]["alignment_uncertainty_seconds"] is None
+    assert derived["provenance"]["alignment_uncertainty_status"] == (
+        "unbounded_historical_missing_stream_start_offsets"
+    )
     assert derived["provenance"]["observed_pair_duration_delta_seconds"] == 0.25
     assert derived["provenance"]["alignment"] == "independent_clocks_not_sample_locked"
     assert derived["provenance"]["training_policy"] == (
-        "exclude_windows_intersecting_boundary_guard_band"
+        "exclude_all_derived_mic2_without_verified_alignment"
     )
 
 

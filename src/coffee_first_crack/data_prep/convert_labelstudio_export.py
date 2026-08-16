@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -236,7 +237,13 @@ def convert_task(
                 raise ValueError(
                     f"MCP mic1 task has unsupported label {annotation['label']!r}: {original_name}"
                 )
-            if start < 0 or end <= start or end > duration:
+            if (
+                not math.isfinite(start)
+                or not math.isfinite(end)
+                or start < 0
+                or end <= start
+                or end > duration
+            ):
                 raise ValueError(
                     f"MCP mic1 task has invalid first_crack boundary {start}-{end}: "
                     f"{original_name} duration={duration}"

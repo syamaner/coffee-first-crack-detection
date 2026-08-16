@@ -239,7 +239,9 @@ def _resolve_source_file(source_root: Path, value: object, *, field: str) -> Pat
     return resolved
 
 
-def _parse_region(label: dict[str, Any], label_path: Path) -> FirstCrackRegion | None:
+def _parse_region(
+    label: dict[str, Any], label_path: Path, duration_sec: float
+) -> FirstCrackRegion | None:
     """Parse the optional single first-crack region and its provenance."""
     annotations = label.get("annotations")
     if not isinstance(annotations, list):
@@ -259,6 +261,8 @@ def _parse_region(label: dict[str, Any], label_path: Path) -> FirstCrackRegion |
         raise ValueError(f"Invalid first-crack region in {label_path}")
     if end_sec <= start_sec:
         raise ValueError(f"first-crack end must be after start in {label_path}")
+    if end_sec > duration_sec:
+        raise ValueError(f"first-crack region is outside held-out stream in {label_path}")
 
     provenance = label.get("provenance")
     provenance = provenance if isinstance(provenance, dict) else {}
@@ -316,6 +320,8 @@ def _validate_label_identity(
     if (
         provenance.get("annotation_source") != "derived_from_paired_mic"
         or provenance.get("derived_from") != primary_stream["staged_relative_path"]
+        or provenance.get("derivation_method")
+        not in {"verified_audio_alignment", "recorded_stream_timestamp_alignment"}
         or provenance.get("alignment") != "independent_clocks_not_sample_locked"
         or provenance.get("exact_stream_start_offsets_available") is not False
         or not isinstance(uncertainty, (int, float))
@@ -326,6 +332,64 @@ def _validate_label_identity(
         raise ValueError(
             f"Holdout mic2 label lacks valid derived-mic uncertainty provenance: {label_path}"
         )
+
+
+def _validate_recording_sidecar(
+    sidecar: dict[str, Any],
+    *,
+    sidecar_path: Path,
+    pair_id: str,
+    streams: list[dict[str, Any]],
+) -> None:
+    """Bind authoritative roast timing metadata to the selected stream pair."""
+    if sidecar.get("schema_version") != 2 or sidecar.get("session_id") != pair_id:
+        raise ValueError(
+            f"Recording sidecar identity does not match pair {pair_id!r}: {sidecar_path}"
+        )
+    sidecar_streams = sidecar.get("streams")
+    if not isinstance(sidecar_streams, list) or len(sidecar_streams) != 2:
+        raise ValueError(f"Recording sidecar must identify both streams: {sidecar_path}")
+    by_filename: dict[str, dict[str, Any]] = {}
+    for item in sidecar_streams:
+        if not isinstance(item, dict) or not isinstance(item.get("wav_filename"), str):
+            raise ValueError(f"Recording sidecar has malformed stream identity: {sidecar_path}")
+        filename = item["wav_filename"]
+        if filename in by_filename:
+            raise ValueError(f"Recording sidecar has duplicate stream identity: {sidecar_path}")
+        by_filename[filename] = item
+    expected_filenames = {str(stream["original_filename"]) for stream in streams}
+    if set(by_filename) != expected_filenames:
+        raise ValueError(f"Recording sidecar streams do not match pair {pair_id!r}: {sidecar_path}")
+    for stream in streams:
+        item = by_filename[str(stream["original_filename"])]
+        raw_duration = item.get("duration_seconds")
+        sample_rate = item.get("sample_rate")
+        if (
+            not isinstance(raw_duration, (int, float))
+            or isinstance(raw_duration, bool)
+            or not isinstance(sample_rate, int)
+            or isinstance(sample_rate, bool)
+        ):
+            raise ValueError(
+                f"Recording sidecar has malformed audio metadata for pair {pair_id!r}: "
+                f"{sidecar_path}"
+            )
+        duration = float(raw_duration)
+        expected_duration = float(stream["duration_seconds"])
+        expected_sample_rate = int(stream["sample_rate"])
+        if (
+            not math.isfinite(duration)
+            or sample_rate != expected_sample_rate
+            or not math.isclose(
+                duration,
+                expected_duration,
+                rel_tol=0.0,
+                abs_tol=1.0 / expected_sample_rate,
+            )
+        ):
+            raise ValueError(
+                f"Recording sidecar audio metadata does not match pair {pair_id!r}: {sidecar_path}"
+            )
 
 
 def discover_heldout_recordings(
@@ -376,12 +440,38 @@ def discover_heldout_recordings(
                 raise ValueError(f"Holdout pair {pair_id!r} has no valid bean origin")
             discovered_origins.add(origin.casefold())
 
+            streams = session["streams"]
+            if (
+                not isinstance(streams, list)
+                or len(streams) != 2
+                or not all(isinstance(stream, dict) for stream in streams)
+                or {int(stream["mic_num"]) for stream in streams} != {1, 2}
+            ):
+                raise ValueError(f"Holdout pair {pair_id!r} must contain exactly mic1 and mic2")
+            for stream in streams:
+                duration_sec = float(stream["duration_seconds"])
+                if not math.isfinite(duration_sec):
+                    raise ValueError(
+                        f"Invalid duration for holdout pair {pair_id!r} mic{stream['mic_num']}"
+                    )
+                if duration_sec < window_seconds:
+                    raise ValueError(
+                        f"Holdout pair {pair_id!r} mic{stream['mic_num']} is only "
+                        f"{duration_sec:.2f}s; at least {window_seconds:.2f}s is required"
+                    )
+
             sidecar_path = _resolve_source_file(
                 source_root,
                 session["recording_sidecar_source_path"],
                 field="recording_sidecar_source_path",
             )
             sidecar = _read_json(sidecar_path)
+            _validate_recording_sidecar(
+                sidecar,
+                sidecar_path=sidecar_path,
+                pair_id=pair_id,
+                streams=streams,
+            )
             milestones = sidecar.get("milestones")
             if (
                 not isinstance(milestones, dict)
@@ -399,21 +489,9 @@ def discover_heldout_recordings(
             if not math.isfinite(drop_offset_sec) or drop_offset_sec <= t0_offset_sec:
                 raise ValueError(f"Invalid drop milestone for holdout pair {pair_id!r}")
 
-            streams = session["streams"]
-            if len(streams) != 2 or {int(stream["mic_num"]) for stream in streams} != {1, 2}:
-                raise ValueError(f"Holdout pair {pair_id!r} must contain exactly mic1 and mic2")
             primary_stream = next(stream for stream in streams if int(stream["mic_num"]) == 1)
             for stream in streams:
                 duration_sec = float(stream["duration_seconds"])
-                if not math.isfinite(duration_sec):
-                    raise ValueError(
-                        f"Invalid duration for holdout pair {pair_id!r} mic{stream['mic_num']}"
-                    )
-                if duration_sec < window_seconds:
-                    raise ValueError(
-                        f"Holdout pair {pair_id!r} mic{stream['mic_num']} is only "
-                        f"{duration_sec:.2f}s; at least {window_seconds:.2f}s is required"
-                    )
                 if drop_offset_sec > duration_sec:
                     raise ValueError(
                         f"Holdout pair {pair_id!r} drop milestone {drop_offset_sec:.2f}s "
@@ -458,7 +536,7 @@ def discover_heldout_recordings(
                         source_sha256=source_sha256,
                         t0_offset_sec=t0_offset_sec,
                         drop_offset_sec=drop_offset_sec,
-                        region=_parse_region(label, label_path),
+                        region=_parse_region(label, label_path, duration_sec),
                     )
                 )
     except (KeyError, TypeError, ValueError) as exc:
@@ -507,13 +585,33 @@ def classify_outcome(
     return "detected"
 
 
-def _prepare_audio(recording: HeldOutRecording, temp_dir: Path) -> tuple[Path, bool]:
+def _snapshot_recording_audio(recording: HeldOutRecording, temp_dir: Path) -> Path:
+    """Copy one verified source WAV into the evaluator-owned immutable workspace."""
+    if _sha256(recording.audio_path) != recording.source_sha256:
+        raise RuntimeError(f"Held-out source changed before snapshot: {recording.audio_path}")
+    snapshot_dir = temp_dir / "source-snapshots"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    destination = snapshot_dir / f"{recording.recording_id}.wav"
+    if destination.exists():
+        raise FileExistsError(f"Duplicate held-out snapshot destination: {destination}")
+    shutil.copyfile(recording.audio_path, destination)
+    if (
+        _sha256(destination) != recording.source_sha256
+        or _sha256(recording.audio_path) != recording.source_sha256
+    ):
+        raise RuntimeError(f"Held-out source changed while snapshotting: {recording.audio_path}")
+    return destination
+
+
+def _prepare_audio(
+    recording: HeldOutRecording, temp_dir: Path, source_path: Path
+) -> tuple[Path, bool]:
     """Return a 16 kHz PCM path, resampling only a temporary copy when required."""
-    info = sf.info(str(recording.audio_path))
+    info = sf.info(str(source_path))
     if info.samplerate == SAMPLE_RATE and info.channels == 1 and info.subtype.startswith("PCM"):
-        return recording.audio_path, False
-    audio, _ = librosa.load(str(recording.audio_path), sr=SAMPLE_RATE, mono=True)
-    destination = temp_dir / f"{recording.recording_id}.wav"
+        return source_path, False
+    audio, _ = librosa.load(str(source_path), sr=SAMPLE_RATE, mono=True)
+    destination = temp_dir / f"{recording.recording_id}__16khz.wav"
     sf.write(str(destination), audio, SAMPLE_RATE, subtype="PCM_16")
     return destination, True
 
@@ -899,6 +997,8 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     evidence_snapshot = _snapshot_inputs(evidence_paths)
     mcp_root = args.mcp_src.resolve().parent
     git_head = _git_head(mcp_root)
+    evaluator_path = Path(__file__).resolve()
+    evaluator_sha256 = _sha256(evaluator_path)
     mcp = _load_mcp(args.mcp_src)
     recordings = discover_heldout_recordings(
         split_integrity_path=args.split_integrity,
@@ -921,6 +1021,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     protocol = {
         "schema_version": 1,
         "status": "frozen_before_inference",
+        "evaluator": {"path": str(evaluator_path), "sha256": evaluator_sha256},
         "mcp": {"source_path": str(mcp_root), "git_head": git_head},
         "model": {
             "repo_id": args.repo_id,
@@ -975,7 +1076,8 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="mcp-heldout-replay-") as temp:
         temp_dir = Path(temp)
         for index, recording in enumerate(recordings, start=1):
-            replay_path, resampled = _prepare_audio(recording, temp_dir)
+            source_snapshot = _snapshot_recording_audio(recording, temp_dir)
+            replay_path, resampled = _prepare_audio(recording, temp_dir, source_snapshot)
             print(
                 f"[{index}/{len(recordings)}] {recording.recording_id} "
                 f"({'positive' if recording.region else 'negative'})",
@@ -993,6 +1095,8 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 overlap=args.overlap,
             )
             results.append(result)
+            if _sha256(source_snapshot) != recording.source_sha256:
+                raise RuntimeError(f"Held-out source snapshot changed during replay: {recording}")
             print(
                 f"  {result['outcome']}: event={result['detected_sec']}s, "
                 f"confirmed={result['confirmed_sec']}s, "
@@ -1001,6 +1105,8 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             )
 
     _verify_input_snapshot(evidence_paths, evidence_snapshot)
+    if _sha256(evaluator_path) != evaluator_sha256:
+        raise RuntimeError("Evaluator script changed during replay")
 
     report = {
         "schema_version": 1,
@@ -1023,6 +1129,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "dataset_exposure_evidence": evidence_snapshot,
         },
         "mcp": {"source_path": str(mcp_root), "git_head": git_head},
+        "evaluator": {"path": str(evaluator_path), "sha256": evaluator_sha256},
         "model": {
             "repo_id": args.repo_id,
             "revision": args.revision,

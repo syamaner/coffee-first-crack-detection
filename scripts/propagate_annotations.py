@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -248,11 +249,11 @@ def propagate_manifest(
 ) -> tuple[int, int]:
     """Derive mic2 annotations for every staged MCP capture pair.
 
-    Boundary timestamps remain on the mic1 time axis because historical MCP
-    captures have no exact cross-stream start offsets. The annotation records
-    the observed pair duration delta and uses the corpus-wide maximum observed
-    delta as a conservative guard band. ``chunk_audio`` excludes any derived
-    window intersecting that guard band.
+    Boundary timestamps remain on the mic1 time axis for auditability, but
+    historical MCP captures have no measured cross-stream start offset. Final
+    WAV duration differences are diagnostic only and cannot bound that offset,
+    so every derived mic2 chunk is excluded from training until a verified
+    alignment method supplies a defensible finite uncertainty.
 
     Args:
         manifest_path: Staged ``capture_manifest.json``.
@@ -281,7 +282,6 @@ def propagate_manifest(
             f"{staging_root.resolve()} != {manifest_staging_root}"
         )
     _, sessions_by_pair = index_manifest_streams(manifest)
-    uncertainty = float(manifest["max_observed_duration_delta_seconds"])
     resolved_audio_root = (audio_root or staging_root).resolve()
     skipped = 0
     plans: list[tuple[Path, Path, dict[str, Any]]] = []
@@ -331,12 +331,14 @@ def propagate_manifest(
                 or isinstance(start, bool)
                 or not isinstance(end, (int, float))
                 or isinstance(end, bool)
+                or not math.isfinite(float(start))
+                or not math.isfinite(float(end))
                 or start < 0
                 or end <= start
                 or end > primary["duration_seconds"]
             ):
                 raise ValueError(f"Human annotation has invalid boundaries: {primary_path}")
-            annotation["confidence"] = "derived_with_alignment_uncertainty"
+            annotation["confidence"] = "derived_unaligned_excluded_from_training"
         derived: dict[str, Any] = {
             "audio_file": target_audio_relative,
             "duration": target["duration_seconds"],
@@ -351,12 +353,15 @@ def propagate_manifest(
                 "annotation_source": "derived_from_paired_mic",
                 "pair_id": pair_id,
                 "derived_from": primary["staged_relative_path"],
-                "derivation_method": "copy_timestamps_with_duration_delta_guard_band",
+                "derivation_method": "copy_timestamps_for_audit_only",
                 "alignment": "independent_clocks_not_sample_locked",
                 "observed_pair_duration_delta_seconds": session["observed_duration_delta_seconds"],
-                "alignment_uncertainty_seconds": uncertainty,
-                "uncertainty_basis": "corpus_max_observed_duration_delta",
-                "training_policy": "exclude_windows_intersecting_boundary_guard_band",
+                "alignment_uncertainty_seconds": None,
+                "alignment_uncertainty_status": (
+                    "unbounded_historical_missing_stream_start_offsets"
+                ),
+                "uncertainty_basis": "duration_delta_is_diagnostic_not_an_alignment_bound",
+                "training_policy": "exclude_all_derived_mic2_without_verified_alignment",
                 "exact_stream_start_offsets_available": False,
             },
         }
@@ -367,9 +372,7 @@ def propagate_manifest(
             print(f"[dry-run] Would derive {target_path.name} from {primary_path.name}")
         else:
             write_json(target_path, derived)
-            print(
-                f"Derived {target_path.name} from {primary_path.name} (±{uncertainty:.3f}s guard)"
-            )
+            print(f"Derived {target_path.name} from {primary_path.name} (excluded: unaligned)")
 
     return len(plans), skipped
 

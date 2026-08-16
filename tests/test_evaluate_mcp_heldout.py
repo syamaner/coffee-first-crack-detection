@@ -94,8 +94,21 @@ def _discovery_fixture(tmp_path: Path) -> dict[str, Any]:
     _write_json(
         sidecar,
         {
+            "schema_version": 2,
             "session_id": "fresh",
             "milestones": {"beans_added": 2.5, "first_crack": 8.0, "drop": 10.0},
+            "streams": [
+                {
+                    "wav_filename": "mic1-fresh.wav",
+                    "duration_seconds": 10.5,
+                    "sample_rate": 16_000,
+                },
+                {
+                    "wav_filename": "mic2-fresh.wav",
+                    "duration_seconds": 10.6,
+                    "sample_rate": 16_000,
+                },
+            ],
         },
     )
     streams = [
@@ -103,7 +116,8 @@ def _discovery_fixture(tmp_path: Path) -> dict[str, Any]:
             "mic_num": 1,
             "label": "primary",
             "original_filename": "mic1-fresh.wav",
-            "duration_seconds": 10.6,
+            "duration_seconds": 10.5,
+            "sample_rate": 16_000,
             "sha256": mic1_sha,
             "source_path": str(mic1),
             "staged_relative_path": "mic1/fresh__mic1-fresh.wav",
@@ -112,7 +126,8 @@ def _discovery_fixture(tmp_path: Path) -> dict[str, Any]:
             "mic_num": 2,
             "label": "paired",
             "original_filename": "mic2-fresh.wav",
-            "duration_seconds": 10.5,
+            "duration_seconds": 10.6,
+            "sample_rate": 16_000,
             "sha256": mic2_sha,
             "source_path": str(mic2),
             "staged_relative_path": "mic2/fresh__mic2-fresh.wav",
@@ -145,6 +160,7 @@ def _discovery_fixture(tmp_path: Path) -> dict[str, Any]:
             provenance.update(
                 {
                     "derived_from": "mic1/fresh__mic1-fresh.wav",
+                    "derivation_method": "verified_audio_alignment",
                     "alignment": "independent_clocks_not_sample_locked",
                     "alignment_uncertainty_seconds": 0.1,
                     "exact_stream_start_offsets_available": False,
@@ -302,9 +318,37 @@ def test_rejects_missing_t0_alignment(tmp_path: Path) -> None:
     fixture = _discovery_fixture(tmp_path)
     holdout = json.loads(fixture["holdout_capture_manifest_path"].read_text())
     sidecar = Path(holdout["sessions"][0]["recording_sidecar_source_path"])
-    _write_json(sidecar, {"milestones": {"beans_added": None, "first_crack": None}})
+    sidecar_data = json.loads(sidecar.read_text(encoding="utf-8"))
+    sidecar_data["milestones"] = {"beans_added": None, "first_crack": None}
+    _write_json(sidecar, sidecar_data)
 
     with pytest.raises(ValueError, match="authoritative recording-relative beans_added"):
+        replay.discover_heldout_recordings(**fixture)
+
+
+def test_rejects_recording_sidecar_from_different_pair(tmp_path: Path) -> None:
+    """T0 and completion metadata must be bound to the selected physical roast."""
+    fixture = _discovery_fixture(tmp_path)
+    holdout = json.loads(fixture["holdout_capture_manifest_path"].read_text())
+    sidecar = Path(holdout["sessions"][0]["recording_sidecar_source_path"])
+    sidecar_data = json.loads(sidecar.read_text(encoding="utf-8"))
+    sidecar_data["session_id"] = "other"
+    _write_json(sidecar, sidecar_data)
+
+    with pytest.raises(ValueError, match="sidecar identity does not match"):
+        replay.discover_heldout_recordings(**fixture)
+
+
+def test_rejects_recording_sidecar_with_wrong_stream(tmp_path: Path) -> None:
+    """Sidecar stream identities cannot be borrowed from another session."""
+    fixture = _discovery_fixture(tmp_path)
+    holdout = json.loads(fixture["holdout_capture_manifest_path"].read_text())
+    sidecar = Path(holdout["sessions"][0]["recording_sidecar_source_path"])
+    sidecar_data = json.loads(sidecar.read_text(encoding="utf-8"))
+    sidecar_data["streams"][1]["wav_filename"] = "mic2-other.wav"
+    _write_json(sidecar, sidecar_data)
+
+    with pytest.raises(ValueError, match="sidecar streams do not match"):
         replay.discover_heldout_recordings(**fixture)
 
 
@@ -313,7 +357,9 @@ def test_rejects_missing_drop_milestone(tmp_path: Path) -> None:
     fixture = _discovery_fixture(tmp_path)
     holdout = json.loads(fixture["holdout_capture_manifest_path"].read_text())
     sidecar = Path(holdout["sessions"][0]["recording_sidecar_source_path"])
-    _write_json(sidecar, {"milestones": {"beans_added": 2.5}})
+    sidecar_data = json.loads(sidecar.read_text(encoding="utf-8"))
+    sidecar_data["milestones"] = {"beans_added": 2.5}
+    _write_json(sidecar, sidecar_data)
 
     with pytest.raises(ValueError, match="beans_added or drop milestone"):
         replay.discover_heldout_recordings(**fixture)
@@ -324,7 +370,9 @@ def test_rejects_drop_after_stream_end(tmp_path: Path) -> None:
     fixture = _discovery_fixture(tmp_path)
     holdout = json.loads(fixture["holdout_capture_manifest_path"].read_text())
     sidecar = Path(holdout["sessions"][0]["recording_sidecar_source_path"])
-    _write_json(sidecar, {"milestones": {"beans_added": 2.5, "drop": 11.0}})
+    sidecar_data = json.loads(sidecar.read_text(encoding="utf-8"))
+    sidecar_data["milestones"] = {"beans_added": 2.5, "drop": 11.0}
+    _write_json(sidecar, sidecar_data)
 
     with pytest.raises(ValueError, match="drop milestone .* exceeds mic1 duration"):
         replay.discover_heldout_recordings(**fixture)
@@ -335,7 +383,9 @@ def test_rejects_drop_before_charge(tmp_path: Path) -> None:
     fixture = _discovery_fixture(tmp_path)
     holdout = json.loads(fixture["holdout_capture_manifest_path"].read_text())
     sidecar = Path(holdout["sessions"][0]["recording_sidecar_source_path"])
-    _write_json(sidecar, {"milestones": {"beans_added": 2.5, "drop": 2.0}})
+    sidecar_data = json.loads(sidecar.read_text(encoding="utf-8"))
+    sidecar_data["milestones"] = {"beans_added": 2.5, "drop": 2.0}
+    _write_json(sidecar, sidecar_data)
 
     with pytest.raises(ValueError, match="Invalid drop milestone"):
         replay.discover_heldout_recordings(**fixture)
@@ -392,6 +442,18 @@ def test_rejects_mic2_without_derived_uncertainty_provenance(tmp_path: Path) -> 
     _write_json(label_path, mic2)
 
     with pytest.raises(ValueError, match="derived-mic uncertainty provenance"):
+        replay.discover_heldout_recordings(**fixture)
+
+
+def test_rejects_region_beyond_heldout_stream_duration(tmp_path: Path) -> None:
+    """An impossible copied mic2 interval cannot become evaluation ground truth."""
+    fixture = _discovery_fixture(tmp_path)
+    label_path = fixture["label_dirs"][0] / "fresh__mic2-fresh.json"
+    mic2 = json.loads(label_path.read_text(encoding="utf-8"))
+    mic2["annotations"][0]["end_time"] = 11.0
+    _write_json(label_path, mic2)
+
+    with pytest.raises(ValueError, match="first-crack region is outside"):
         replay.discover_heldout_recordings(**fixture)
 
 
@@ -511,6 +573,17 @@ def test_input_snapshot_rejects_missing_evidence(tmp_path: Path) -> None:
     """Every frozen exposure input must exist before discovery."""
     with pytest.raises(ValueError, match="Missing replay evidence input"):
         replay._snapshot_inputs({"missing": tmp_path / "missing.json"})
+
+
+def test_audio_snapshot_remains_frozen_when_source_changes(tmp_path: Path) -> None:
+    """Replay reads evaluator-owned bytes, not a mutable source path."""
+    fixture = _discovery_fixture(tmp_path)
+    recording = replay.discover_heldout_recordings(**fixture)[0]
+
+    snapshot = replay._snapshot_recording_audio(recording, tmp_path / "work")
+    recording.audio_path.write_bytes(b"changed")
+
+    assert replay._sha256(snapshot) == recording.source_sha256
 
 
 def test_git_head_fails_closed_when_git_is_unavailable(

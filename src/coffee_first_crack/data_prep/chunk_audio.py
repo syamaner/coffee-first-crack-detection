@@ -327,27 +327,6 @@ def process_recording(
         "excluded_uncertain": 0,
     }
     stem = Path(audio_file).stem
-    provenance = ann.get("provenance")
-    uncertainty = 0.0
-    derived = False
-    if (
-        isinstance(provenance, dict)
-        and provenance.get("annotation_source") == "derived_from_paired_mic"
-    ):
-        derived = True
-        raw_uncertainty = provenance.get("alignment_uncertainty_seconds")
-        if not isinstance(raw_uncertainty, (int, float)) or isinstance(raw_uncertainty, bool):
-            raise ValueError(
-                f"Derived annotation lacks numeric alignment uncertainty: {annotation_path}"
-            )
-        uncertainty = float(raw_uncertainty)
-        if provenance.get("training_policy") != (
-            "exclude_windows_intersecting_boundary_guard_band"
-        ):
-            raise ValueError(
-                f"Derived annotation lacks the required uncertainty policy: {annotation_path}"
-            )
-
     resolved_pair_id = pair_id or ann.get("pair_id")
     if not isinstance(resolved_pair_id, str) or not resolved_pair_id:
         resolved_pair_id = f"single:{stem}"
@@ -355,15 +334,62 @@ def process_recording(
     if resolved_mic_num is not None and not isinstance(resolved_mic_num, int):
         raise ValueError(f"Annotation mic_num must be an integer: {annotation_path}")
 
+    provenance = ann.get("provenance")
+    uncertainty = 0.0
+    derived = False
+    exclude_all_derived = False
+    if (
+        isinstance(provenance, dict)
+        and provenance.get("annotation_source") == "derived_from_paired_mic"
+    ):
+        derived = True
+        training_policy = provenance.get("training_policy")
+        if training_policy == "exclude_all_derived_mic2_without_verified_alignment":
+            if (
+                provenance.get("alignment_uncertainty_seconds") is not None
+                or provenance.get("alignment_uncertainty_status")
+                != "unbounded_historical_missing_stream_start_offsets"
+            ):
+                raise ValueError(
+                    f"Unaligned derived annotation has inconsistent uncertainty: {annotation_path}"
+                )
+            exclude_all_derived = True
+        elif training_policy == "exclude_windows_intersecting_boundary_guard_band":
+            raw_uncertainty = provenance.get("alignment_uncertainty_seconds")
+            if (
+                not isinstance(raw_uncertainty, (int, float))
+                or isinstance(raw_uncertainty, bool)
+                or not np.isfinite(float(raw_uncertainty))
+                or raw_uncertainty < 0
+                or provenance.get("derivation_method")
+                not in {"verified_audio_alignment", "recorded_stream_timestamp_alignment"}
+            ):
+                raise ValueError(
+                    f"Derived annotation lacks verified finite alignment uncertainty: "
+                    f"{annotation_path}"
+                )
+            uncertainty = float(raw_uncertainty)
+        else:
+            raise ValueError(
+                f"Derived annotation lacks the required uncertainty policy: {annotation_path}"
+            )
+    elif ann.get("pair_id") is not None and ann.get("mic_num") == 2:
+        raise ValueError(
+            f"Paired mic2 annotation lacks required derived provenance: {annotation_path}"
+        )
+
     for chunk in chunks:
         lbl: str = chunk["label"]
         start: float = chunk["start_sec"]
         filename = f"{stem}_w{start:06.1f}.wav"
-        excluded = derived and intersects_uncertain_boundary(
-            start,
-            float(chunk["end_sec"]),
-            ann["annotations"],
-            uncertainty,
+        excluded = derived and (
+            exclude_all_derived
+            or intersects_uncertain_boundary(
+                start,
+                float(chunk["end_sec"]),
+                ann["annotations"],
+                uncertainty,
+            )
         )
         manifest_record: dict[str, Any] = {
             "chunk_filename": filename,
@@ -380,8 +406,12 @@ def process_recording(
             ),
         }
         if excluded:
-            manifest_record["exclusion_reason"] = "derived_boundary_alignment_uncertainty"
-            manifest_record["alignment_uncertainty_seconds"] = uncertainty
+            if exclude_all_derived:
+                manifest_record["exclusion_reason"] = "derived_mic2_without_verified_alignment"
+                manifest_record["alignment_uncertainty_seconds"] = None
+            else:
+                manifest_record["exclusion_reason"] = "derived_boundary_alignment_uncertainty"
+                manifest_record["alignment_uncertainty_seconds"] = uncertainty
             counts["excluded_uncertain"] += 1
             if chunk_manifest_records is not None:
                 chunk_manifest_records.append(manifest_record)

@@ -285,16 +285,19 @@ timestamps are not represented as exact mic2 ground truth. Each mic2 JSON record
 
 - `pair_id` and `derived_from`;
 - `derivation_method` and the independent-clock alignment statement;
-- that pair's observed duration delta;
-- the corpus-wide maximum observed duration delta as
-  `alignment_uncertainty_seconds` (3.5 s for the 16 Aug corpus);
+- that pair's observed duration delta as a diagnostic, **not** an alignment bound;
+- `alignment_uncertainty_seconds: null` plus the explicit unbounded status;
 - the deterministic training policy.
 
-The chunker excludes every derived mic2 window that intersects the uncertainty
-guard around either first-crack boundary. Interior windows remain usable; every
-exclusion is written to `chunk_manifest.jsonl`. Missing human annotations,
-missing targets, ambiguous identities, and pre-existing derived outputs fail
-instead of being silently skipped.
+Because final-duration difference cannot bound independent start delay or drift,
+the chunker excludes **every historical derived mic2 window**. The copied
+timestamps remain deterministic, paired, and auditable, but they are not
+training ground truth. A future annotation may use a finite guard band only when
+its provenance names a verified audio-alignment or recorded-stream-timestamp
+method. Every exclusion is written to `chunk_manifest.jsonl`. Missing human
+annotations, missing targets, ambiguous identities, malformed paired-mic
+provenance, and pre-existing derived outputs fail instead of being silently
+skipped.
 
 The no-`--manifest` mode remains for the separate sample-aligned Aggregate
 Device bench workflow from `scripts/record_mics.py`.
@@ -403,14 +406,17 @@ pair IDs and source checksums before evaluation. Every session must contain both
 microphones plus an authoritative recording-relative `beans_added`/T0 milestone.
 The authoritative `drop` milestone must also fall within both stream durations.
 Establish FC ground truth afterward by labelling mic1 in Label Studio, ideally
-without viewing model predictions; derive mic2 with the independent-clock
-uncertainty provenance described above. Never pass this tree to chunking,
-splitting, training, validation, threshold selection, or model selection.
+without viewing model predictions. Mic2 robustness evaluation additionally
+requires verified audio alignment or recorded per-stream timestamps with a
+finite uncertainty; the historical unbounded derivation policy is deliberately
+rejected by the held-out evaluator. Never pass this tree to chunking, splitting,
+training, validation, threshold selection, or model selection.
 
 After recording fresh sessions, stage them into a separate local holdout tree,
 label only their UUID-prefixed mic1 files in Label Studio, convert the export,
-and derive mic2 exactly as in Steps 1–4. Keep their pair IDs out of chunking,
-splitting, model selection, and threshold selection. Then run:
+and establish a verified finite-bound mic2 alignment before replay. Keep their
+pair IDs out of chunking, splitting, model selection, and threshold selection.
+Then run:
 
 ```bash
 venv/bin/python scripts/evaluate_mcp_heldout.py \
@@ -434,8 +440,11 @@ Before the first model call, the command writes a sibling
 `*.protocol.json` lock containing the model/preprocessor hashes, frozen profile,
 pair IDs, WAV/label hashes, T0/drop offsets, mic roles, and hashes for the split,
 chunk, dataset-capture, and holdout manifests used to prove non-exposure. The
-selected MCP checkout must be clean. Re-running the same output path with any
-change fails. Per roast and per mic, the report preserves:
+recording sidecar's session and two stream identities must match the selected
+pair. The evaluator hashes itself, copies each checksum-verified WAV into its
+own temporary snapshot, and replays only that snapshot. The selected MCP
+checkout must be clean. Re-running the same output path with any change fails.
+Per roast and per mic, the report preserves:
 
 - pre-FC false notification, miss, and every emitted event count;
 - backdated event error: earliest qualifying window onset minus labelled FC;

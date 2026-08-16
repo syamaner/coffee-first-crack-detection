@@ -48,6 +48,7 @@ def test_derived_boundary_windows_are_reported_and_not_written(
                 "annotations": [{"start_time": 20.0, "end_time": 50.0, "label": "first_crack"}],
                 "provenance": {
                     "annotation_source": "derived_from_paired_mic",
+                    "derivation_method": "verified_audio_alignment",
                     "alignment_uncertainty_seconds": 3.5,
                     "training_policy": "exclude_windows_intersecting_boundary_guard_band",
                 },
@@ -79,6 +80,225 @@ def test_derived_boundary_windows_are_reported_and_not_written(
         for record in records
         if record["included"] is False
     )
+
+
+def test_unaligned_derived_mic2_excludes_every_chunk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Historical timestamps remain auditable but never become training ground truth."""
+    audio_root = tmp_path / "audio"
+    audio_root.mkdir()
+    (audio_root / "mic2.wav").write_bytes(b"stub")
+    annotation_path = tmp_path / "mic2.json"
+    annotation_path.write_text(
+        json.dumps(
+            {
+                "audio_file": "mic2.wav",
+                "pair_id": "pair-1",
+                "mic_num": 2,
+                "annotations": [{"start_time": 20.0, "end_time": 50.0, "label": "first_crack"}],
+                "provenance": {
+                    "annotation_source": "derived_from_paired_mic",
+                    "alignment_uncertainty_seconds": None,
+                    "alignment_uncertainty_status": (
+                        "unbounded_historical_missing_stream_start_offsets"
+                    ),
+                    "training_policy": ("exclude_all_derived_mic2_without_verified_alignment"),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        chunking.librosa,
+        "load",
+        lambda *_args, **_kwargs: (np.zeros(60 * 100, dtype=np.float32), 100),
+    )
+    monkeypatch.setattr(chunking, "save_chunk", lambda *_args, **_kwargs: None)
+    records: list[dict[str, object]] = []
+
+    counts = process_recording(
+        annotation_path,
+        audio_root,
+        tmp_path / "processed",
+        window_size=10.0,
+        sample_rate=100,
+        chunk_manifest_records=records,
+    )
+
+    assert counts["first_crack"] == 0
+    assert counts["no_first_crack"] == 0
+    assert counts["excluded_uncertain"] == len(records)
+    assert all(record["included"] is False for record in records)
+    assert {record["exclusion_reason"] for record in records} == {
+        "derived_mic2_without_verified_alignment"
+    }
+
+
+def test_paired_mic2_without_derived_provenance_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malformed MCP mic2 annotation cannot fall through as exact legacy ground truth."""
+    audio_root = tmp_path / "audio"
+    audio_root.mkdir()
+    (audio_root / "mic2.wav").write_bytes(b"stub")
+    annotation_path = tmp_path / "mic2.json"
+    annotation_path.write_text(
+        json.dumps(
+            {
+                "audio_file": "mic2.wav",
+                "pair_id": "pair-1",
+                "mic_num": 2,
+                "annotations": [],
+                "provenance": {"annotation_source": "misspelled"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        chunking.librosa,
+        "load",
+        lambda *_args, **_kwargs: (np.zeros(20 * 100, dtype=np.float32), 100),
+    )
+
+    with pytest.raises(ValueError, match="Paired mic2 annotation lacks"):
+        process_recording(
+            annotation_path,
+            audio_root,
+            tmp_path / "processed",
+            window_size=10.0,
+            sample_rate=100,
+        )
+
+
+@pytest.mark.parametrize(
+    ("provenance", "message"),
+    [
+        (
+            {
+                "annotation_source": "derived_from_paired_mic",
+                "alignment_uncertainty_seconds": 1.0,
+                "alignment_uncertainty_status": (
+                    "unbounded_historical_missing_stream_start_offsets"
+                ),
+                "training_policy": "exclude_all_derived_mic2_without_verified_alignment",
+            },
+            "inconsistent uncertainty",
+        ),
+        (
+            {
+                "annotation_source": "derived_from_paired_mic",
+                "derivation_method": "copy_timestamps_for_audit_only",
+                "alignment_uncertainty_seconds": 1.0,
+                "training_policy": "exclude_windows_intersecting_boundary_guard_band",
+            },
+            "lacks verified finite alignment uncertainty",
+        ),
+    ],
+)
+def test_inconsistent_derived_alignment_provenance_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provenance: dict[str, object],
+    message: str,
+) -> None:
+    """Neither a false finite bound nor an unverified guard band is accepted."""
+    audio_root = tmp_path / "audio"
+    audio_root.mkdir()
+    (audio_root / "mic2.wav").write_bytes(b"stub")
+    annotation_path = tmp_path / "mic2.json"
+    annotation_path.write_text(
+        json.dumps(
+            {
+                "audio_file": "mic2.wav",
+                "pair_id": "pair-1",
+                "mic_num": 2,
+                "annotations": [],
+                "provenance": provenance,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        chunking.librosa,
+        "load",
+        lambda *_args, **_kwargs: (np.zeros(20 * 100, dtype=np.float32), 100),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        process_recording(
+            annotation_path,
+            audio_root,
+            tmp_path / "processed",
+            window_size=10.0,
+            sample_rate=100,
+        )
+
+
+def test_legacy_single_mic_chunk_keeps_deterministic_pair_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Legacy annotations without pairing metadata remain supported."""
+    audio_root = tmp_path / "audio"
+    audio_root.mkdir()
+    (audio_root / "legacy.wav").write_bytes(b"stub")
+    annotation_path = tmp_path / "legacy.json"
+    annotation_path.write_text(
+        json.dumps({"audio_file": "legacy.wav", "annotations": []}), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        chunking.librosa,
+        "load",
+        lambda *_args, **_kwargs: (np.zeros(20 * 100, dtype=np.float32), 100),
+    )
+    monkeypatch.setattr(chunking, "save_chunk", lambda *_args, **_kwargs: None)
+    records: list[dict[str, object]] = []
+
+    process_recording(
+        annotation_path,
+        audio_root,
+        tmp_path / "processed",
+        window_size=10.0,
+        sample_rate=100,
+        chunk_manifest_records=records,
+    )
+
+    assert {record["pair_id"] for record in records} == {"single:legacy"}
+
+
+def test_non_integer_annotation_mic_number_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Malformed pairing metadata cannot be normalized implicitly."""
+    audio_root = tmp_path / "audio"
+    audio_root.mkdir()
+    (audio_root / "bad.wav").write_bytes(b"stub")
+    annotation_path = tmp_path / "bad.json"
+    annotation_path.write_text(
+        json.dumps(
+            {
+                "audio_file": "bad.wav",
+                "pair_id": "pair-1",
+                "mic_num": "2",
+                "annotations": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        chunking.librosa,
+        "load",
+        lambda *_args, **_kwargs: (np.zeros(20 * 100, dtype=np.float32), 100),
+    )
+
+    with pytest.raises(ValueError, match="mic_num must be an integer"):
+        process_recording(
+            annotation_path,
+            audio_root,
+            tmp_path / "processed",
+            window_size=10.0,
+            sample_rate=100,
+        )
 
 
 def test_panama_style_session_names_resolve_to_one_pair(tmp_path: Path) -> None:
