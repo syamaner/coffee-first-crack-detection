@@ -144,6 +144,53 @@ def test_paired_streams_never_cross_splits_and_seed_is_deterministic(tmp_path: P
     assert all(len(streams) == 2 for streams in recordings.values())
 
 
+def test_pair_manifest_rejects_traversing_label(tmp_path: Path) -> None:
+    """An untrusted manifest label cannot escape the input or split root."""
+    manifest = tmp_path / "chunk_manifest.jsonl"
+    manifest.write_text(
+        json.dumps(
+            {
+                "chunk_filename": "chunk.wav",
+                "recording_id": "recording",
+                "pair_id": "pair",
+                "label": "../escape",
+                "included": True,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Unsupported chunk label"):
+        group_chunks_by_pair(tmp_path, manifest)
+
+
+def test_pair_manifest_rejects_symlinked_chunk(tmp_path: Path) -> None:
+    """A manifest cannot import a chunk through a symlink to another corpus."""
+    external = tmp_path / "external.wav"
+    external.write_bytes(b"wav")
+    label_dir = tmp_path / "first_crack"
+    label_dir.mkdir()
+    (label_dir / "chunk.wav").symlink_to(external)
+    manifest = tmp_path / "chunk_manifest.jsonl"
+    manifest.write_text(
+        json.dumps(
+            {
+                "chunk_filename": "chunk.wav",
+                "recording_id": "recording",
+                "pair_id": "pair",
+                "label": "first_crack",
+                "included": True,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(FileNotFoundError, match="regular non-symlink"):
+        group_chunks_by_pair(tmp_path, manifest)
+
+
 def test_split_integrity_report_is_machine_checkable(tmp_path: Path) -> None:
     groups = {
         "pair-train": {"first_crack": [Path("train.wav")]},

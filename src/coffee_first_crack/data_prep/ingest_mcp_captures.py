@@ -371,6 +371,12 @@ def stage_captures(
         RuntimeError: If copy verification or source-integrity checks fail.
         ValueError: If source validation fails.
     """
+    capture_root_resolved = capture_root.resolve()
+    staging_root_resolved = staging_root.resolve()
+    if staging_root.is_symlink():
+        raise ValueError(f"Staging root may not be a symlink: {staging_root}")
+    if staging_root_resolved.is_relative_to(capture_root_resolved):
+        raise ValueError(f"Staging root must be outside the immutable capture root: {staging_root}")
     if staging_root.exists() and any(staging_root.iterdir()):
         raise FileExistsError(f"Staging root must be absent or empty: {staging_root}")
     sessions = discover_sessions(capture_root, staging_root)

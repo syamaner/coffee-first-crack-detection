@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import json
 import math
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -25,7 +27,7 @@ import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
 
 import librosa
 import soundfile as sf
@@ -58,6 +60,19 @@ class HeldOutRecording:
     region: FirstCrackRegion | None
 
 
+class ResolvedArtifactLike(Protocol):
+    """Artifact attributes consumed from the selected MCP checkout."""
+
+    local_path: Path
+
+
+class ResolvedDetectorArtifactsLike(Protocol):
+    """Resolved detector bundle attributes consumed by this evaluator."""
+
+    onnx_model: ResolvedArtifactLike
+    feature_extractor_config: ResolvedArtifactLike
+
+
 def _sha256(path: Path) -> str:
     """Return the SHA-256 digest of a local file."""
     digest = hashlib.sha256()
@@ -76,6 +91,21 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"Expected a JSON object in {path}")
     return value
+
+
+def _git_head(repository_root: Path) -> str:
+    """Return a repository HEAD using an explicitly resolved Git executable."""
+    git_executable = shutil.which("git")
+    if git_executable is None:
+        raise RuntimeError("Git executable is required to freeze the MCP source revision")
+    # The executable is resolved above, argv is constant, and shell execution is disabled.
+    return subprocess.run(  # noqa: S603
+        [git_executable, "rev-parse", "HEAD"],
+        cwd=repository_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
 
 def _split_recording_ids(
@@ -147,6 +177,21 @@ def _resolve_label_path(recording_id: str, label_dirs: tuple[Path, ...]) -> Path
     return matches[0]
 
 
+def _resolve_source_file(source_root: Path, value: object, *, field: str) -> Path:
+    """Resolve a manifest source file without allowing reads outside its capture root."""
+    if not isinstance(value, str):
+        raise ValueError(f"Holdout manifest {field} must be an absolute path string")
+    raw_path = Path(value)
+    if not raw_path.is_absolute():
+        raise ValueError(f"Holdout manifest {field} must be absolute: {value!r}")
+    resolved = raw_path.resolve()
+    if not resolved.is_relative_to(source_root):
+        raise ValueError(f"Holdout manifest {field} escapes source_root: {value!r}")
+    if not resolved.is_file() or raw_path.is_symlink():
+        raise ValueError(f"Holdout manifest {field} is not a regular source file: {value!r}")
+    return resolved
+
+
 def _parse_region(label: dict[str, Any], label_path: Path) -> FirstCrackRegion | None:
     """Parse the optional single first-crack region and its provenance."""
     annotations = label.get("annotations")
@@ -196,6 +241,12 @@ def discover_heldout_recordings(
     split_pair_ids, _ = _split_recording_ids(split_integrity_path, chunk_manifest_path)
     used_hashes = _used_source_hashes(dataset_capture_manifest_path, split_pair_ids)
     holdout_manifest = _read_json(holdout_capture_manifest_path)
+    source_root_value = holdout_manifest.get("source_root")
+    if not isinstance(source_root_value, str) or not Path(source_root_value).is_absolute():
+        raise ValueError("Holdout manifest source_root must be an absolute path string")
+    source_root = Path(source_root_value).resolve()
+    if not source_root.is_dir():
+        raise ValueError(f"Holdout manifest source_root is not a directory: {source_root}")
     recordings: list[HeldOutRecording] = []
     discovered_pairs: set[str] = set()
     try:
@@ -212,7 +263,11 @@ def discover_heldout_recordings(
             if pair_id in split_pair_ids:
                 raise ValueError(f"Holdout pair {pair_id!r} already appears in a dataset split")
 
-            sidecar_path = Path(str(session["recording_sidecar_source_path"]))
+            sidecar_path = _resolve_source_file(
+                source_root,
+                session["recording_sidecar_source_path"],
+                field="recording_sidecar_source_path",
+            )
             sidecar = _read_json(sidecar_path)
             milestones = sidecar.get("milestones")
             if not isinstance(milestones, dict) or milestones.get("beans_added") is None:
@@ -240,9 +295,9 @@ def discover_heldout_recordings(
                         f"Holdout pair {pair_id!r} reuses a source checksum already exposed "
                         "to a dataset split"
                     )
-                audio_path = Path(str(stream["source_path"])).resolve()
-                if not audio_path.is_file():
-                    raise ValueError(f"Held-out audio does not exist: {audio_path}")
+                audio_path = _resolve_source_file(
+                    source_root, stream["source_path"], field="streams[].source_path"
+                )
                 if _sha256(audio_path) != source_sha256:
                     raise ValueError(f"Held-out source checksum changed: {audio_path}")
                 recording_id = Path(str(stream["staged_relative_path"])).stem
@@ -313,31 +368,46 @@ def _load_mcp(mcp_src: Path) -> dict[str, Any]:
     resolved = mcp_src.resolve()
     if not (resolved / "coffee_roaster_mcp" / "detector.py").is_file():
         raise ValueError(f"Not a coffee-roaster-mcp src directory: {resolved}")
-    sys.path.insert(0, str(resolved))
-    from coffee_roaster_mcp.artifacts import ResolvedArtifact, ResolvedDetectorArtifacts
-    from coffee_roaster_mcp.audio import build_audio_capture_pipeline
-    from coffee_roaster_mcp.config import AudioConfig, FirstCrackConfig
-    from coffee_roaster_mcp.detector import (
-        build_first_crack_detector_adapter,
-        build_released_onnx_first_crack_detector_backend,
+    preloaded = sorted(
+        name
+        for name in sys.modules
+        if name == "coffee_roaster_mcp" or name.startswith("coffee_roaster_mcp.")
     )
+    if preloaded:
+        raise RuntimeError(
+            "coffee_roaster_mcp was imported before source selection; "
+            f"refusing ambiguous provenance: {preloaded}"
+        )
+    sys.path.insert(0, str(resolved))
+    modules = {
+        name: importlib.import_module(f"coffee_roaster_mcp.{name}")
+        for name in ("artifacts", "audio", "config", "detector")
+    }
+    for name, module in modules.items():
+        module_file = getattr(module, "__file__", None)
+        if module_file is None or not Path(module_file).resolve().is_relative_to(resolved):
+            raise RuntimeError(
+                f"Imported coffee_roaster_mcp.{name} outside selected source tree: {module_file}"
+            )
 
     return {
-        "AudioConfig": AudioConfig,
-        "FirstCrackConfig": FirstCrackConfig,
-        "ResolvedArtifact": ResolvedArtifact,
-        "ResolvedDetectorArtifacts": ResolvedDetectorArtifacts,
-        "build_audio_capture_pipeline": build_audio_capture_pipeline,
-        "build_first_crack_detector_adapter": build_first_crack_detector_adapter,
+        "AudioConfig": modules["config"].AudioConfig,
+        "FirstCrackConfig": modules["config"].FirstCrackConfig,
+        "ResolvedArtifact": modules["artifacts"].ResolvedArtifact,
+        "ResolvedDetectorArtifacts": modules["artifacts"].ResolvedDetectorArtifacts,
+        "build_audio_capture_pipeline": modules["audio"].build_audio_capture_pipeline,
+        "build_first_crack_detector_adapter": modules[
+            "detector"
+        ].build_first_crack_detector_adapter,
         "build_released_onnx_first_crack_detector_backend": (
-            build_released_onnx_first_crack_detector_backend
+            modules["detector"].build_released_onnx_first_crack_detector_backend
         ),
     }
 
 
 def _resolved_artifacts(
     mcp: dict[str, Any], *, onnx_dir: Path, repo_id: str, revision: str | None
-) -> object:
+) -> ResolvedDetectorArtifactsLike:
     """Build MCP artifact metadata for an unpublished local candidate."""
     onnx_models = sorted(onnx_dir.glob("*.onnx"))
     if len(onnx_models) != 1:
@@ -346,18 +416,21 @@ def _resolved_artifacts(
     if not preprocessor.is_file():
         raise ValueError(f"Missing {preprocessor}")
     artifact_type = mcp["ResolvedArtifact"]
-    return mcp["ResolvedDetectorArtifacts"](
-        onnx_model=artifact_type(
-            repo_id=repo_id,
-            revision=revision,
-            filename="onnx/int8/model_quantized.onnx",
-            local_path=onnx_models[0].resolve(),
-        ),
-        feature_extractor_config=artifact_type(
-            repo_id=repo_id,
-            revision=revision,
-            filename="onnx/int8/preprocessor_config.json",
-            local_path=preprocessor.resolve(),
+    return cast(
+        ResolvedDetectorArtifactsLike,
+        mcp["ResolvedDetectorArtifacts"](
+            onnx_model=artifact_type(
+                repo_id=repo_id,
+                revision=revision,
+                filename="onnx/int8/model_quantized.onnx",
+                local_path=onnx_models[0].resolve(),
+            ),
+            feature_extractor_config=artifact_type(
+                repo_id=repo_id,
+                revision=revision,
+                filename="onnx/int8/preprocessor_config.json",
+                local_path=preprocessor.resolve(),
+            ),
         ),
     )
 
@@ -366,7 +439,7 @@ def _evaluate_recording(
     *,
     mcp: dict[str, Any],
     config: object,
-    artifacts: object,
+    artifacts: ResolvedDetectorArtifactsLike,
     backend: object,
     recording: HeldOutRecording,
     replay_path: Path,
@@ -673,13 +746,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     model_path = Path(artifacts.onnx_model.local_path)
     hop_seconds = args.window_seconds * (1.0 - args.overlap)
     mcp_root = args.mcp_src.resolve().parent
-    git_head = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=mcp_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    git_head = _git_head(mcp_root)
     protocol = {
         "schema_version": 1,
         "status": "frozen_before_inference",

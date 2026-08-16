@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import numpy as np
@@ -102,13 +104,14 @@ def _discovery_fixture(tmp_path: Path) -> dict[str, Any]:
     _write_json(
         holdout_manifest,
         {
+            "source_root": str(tmp_path / "fresh"),
             "sessions": [
                 {
                     "pair_id": "fresh",
                     "recording_sidecar_source_path": str(sidecar),
                     "streams": streams,
                 }
-            ]
+            ],
         },
     )
     for recording_id, mic_num in (("fresh__mic1-fresh", 1), ("fresh__mic2-fresh", 2)):
@@ -201,6 +204,18 @@ def test_rejects_recording_shorter_than_detector_window(tmp_path: Path) -> None:
         replay.discover_heldout_recordings(**fixture)
 
 
+def test_rejects_source_path_outside_manifest_root(tmp_path: Path) -> None:
+    """A holdout manifest cannot make the evaluator read an unrelated file."""
+    fixture = _discovery_fixture(tmp_path)
+    holdout = json.loads(fixture["holdout_capture_manifest_path"].read_text())
+    outside = tmp_path / "outside.wav"
+    holdout["sessions"][0]["streams"][0]["source_path"] = str(outside)
+    _write_json(fixture["holdout_capture_manifest_path"], holdout)
+
+    with pytest.raises(ValueError, match="escapes source_root"):
+        replay.discover_heldout_recordings(**fixture)
+
+
 @pytest.mark.parametrize(
     ("region", "detected_sec", "expected"),
     [
@@ -235,3 +250,26 @@ def test_frozen_protocol_cannot_change_after_creation(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="differs from this invocation"):
         replay._freeze_protocol(path, {"model": "a", "threshold": 0.7})
+
+
+def test_git_head_fails_closed_when_git_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Protocol provenance cannot silently omit the MCP source revision."""
+    monkeypatch.setattr(replay.shutil, "which", lambda _name: None)
+
+    with pytest.raises(RuntimeError, match="Git executable is required"):
+        replay._git_head(tmp_path)
+
+
+def test_mcp_import_rejects_preloaded_ambiguous_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The requested MCP checkout cannot be shadowed by a cached module."""
+    source = tmp_path / "src" / "coffee_roaster_mcp"
+    source.mkdir(parents=True)
+    (source / "detector.py").write_text("", encoding="utf-8")
+    monkeypatch.setitem(sys.modules, "coffee_roaster_mcp", ModuleType("coffee_roaster_mcp"))
+
+    with pytest.raises(RuntimeError, match="refusing ambiguous provenance"):
+        replay._load_mcp(tmp_path / "src")

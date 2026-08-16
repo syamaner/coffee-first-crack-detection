@@ -26,6 +26,7 @@ from typing import Any, cast
 from sklearn.model_selection import train_test_split
 
 logger = logging.getLogger(__name__)
+_CHUNK_LABELS = frozenset({"first_crack", "no_first_crack"})
 
 
 def extract_recording_stem(chunk_filename: str) -> str:
@@ -116,6 +117,7 @@ def group_chunks_by_pair(
             pair_id = record.get("pair_id")
             recording_id = record.get("recording_id")
             label = record.get("label")
+            included = record.get("included")
             if (
                 not isinstance(filename, str)
                 or not filename
@@ -125,19 +127,27 @@ def group_chunks_by_pair(
                 or not recording_id
                 or not isinstance(label, str)
                 or not label
+                or not isinstance(included, bool)
             ):
                 raise ValueError(f"Chunk manifest line {line_number} lacks required identities")
+            if label not in _CHUNK_LABELS:
+                raise ValueError(f"Unsupported chunk label at line {line_number}: {label!r}")
             recordings_by_pair[pair_id].add(recording_id)
-            if record.get("included") is not True:
+            if not included:
                 continue
             if Path(filename).name != filename:
                 raise ValueError(f"Unsafe chunk filename at line {line_number}: {filename!r}")
             if filename in declared_filenames:
                 raise ValueError(f"Duplicate included chunk in manifest: {filename}")
             declared_filenames.add(filename)
-            chunk_path = input_dir / label / filename
-            if not chunk_path.is_file():
-                raise FileNotFoundError(f"Declared chunk does not exist: {chunk_path}")
+            label_dir = input_dir / label
+            if not label_dir.is_dir() or label_dir.is_symlink():
+                raise ValueError(f"Chunk label directory must be a regular directory: {label_dir}")
+            chunk_path = label_dir / filename
+            if not chunk_path.is_file() or chunk_path.is_symlink():
+                raise FileNotFoundError(
+                    f"Declared chunk must be a regular non-symlink file: {chunk_path}"
+                )
             groups[pair_id][label].append(chunk_path)
 
     actual_filenames = {

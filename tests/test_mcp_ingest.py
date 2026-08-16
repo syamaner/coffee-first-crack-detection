@@ -118,6 +118,16 @@ class TestMcpCaptureStaging:
         assert manifest["session_count"] == 1
         assert not output.exists()
 
+    def test_staging_inside_capture_root_is_rejected_without_writing(self, tmp_path: Path) -> None:
+        capture_root = tmp_path / "captures"
+        _make_session(capture_root, "1" * 32)
+        output = capture_root / "staged"
+
+        with pytest.raises(ValueError, match="outside the immutable capture root"):
+            stage_captures(capture_root, output)
+
+        assert not output.exists()
+
     @pytest.mark.parametrize("defect", ["missing_wav", "malformed_sidecar", "traversal"])
     def test_invalid_sessions_fail_closed(self, tmp_path: Path, defect: str) -> None:
         capture_root = tmp_path / "captures"
