@@ -228,6 +228,26 @@ def load_annotation(path: Path) -> dict[str, Any]:
         return json.load(f)
 
 
+def discover_annotation_files(labels_dir: Path) -> list[Path]:
+    """Return per-recording annotation files, excluding exports and backups.
+
+    Args:
+        labels_dir: Root containing converted per-recording annotations.
+
+    Returns:
+        Sorted annotation paths safe to pass to :func:`load_annotation`.
+    """
+    candidates = sorted(labels_dir.rglob("*.json"))
+    return [
+        path
+        for path in candidates
+        if "bak" not in path.relative_to(labels_dir).parts
+        and not path.name.startswith("project-")
+        and path.name != "labelstudio-export.json"
+        and not path.name.startswith("labelstudio-export-")
+    ]
+
+
 def save_chunk(samples: np.ndarray, path: Path, sr: int) -> None:
     """Write a WAV chunk to disk.
 
@@ -553,13 +573,7 @@ def main() -> None:
     hop = args.hop_size if args.hop_size is not None else args.window_size
 
     # Find per-file annotation JSONs (exclude Label Studio exports / backups)
-    candidates = sorted(args.labels_dir.rglob("*.json"))
-    annotation_files = [
-        p
-        for p in candidates
-        if "bak" not in p.relative_to(args.labels_dir).parts
-        and not (p.name.startswith("project-") or p.name.startswith("labelstudio-export-"))
-    ]
+    annotation_files = discover_annotation_files(args.labels_dir)
 
     if not annotation_files:
         print(f"❌ No annotation files found in {args.labels_dir}")

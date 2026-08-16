@@ -112,10 +112,17 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 
 **Phase 7 complete.** S19 (#46) + S20 (#47) delivered in PR #48.
 
-**S22 in progress — human annotation handoff** (#68):
-- 38 capture UUIDs and 76 streams validated and staged without flattening
-- mic1-only Label Studio task directory prepared with 38 files
-- pair-aware pipeline hardening is implemented; rebuild/training awaits the human JSON export
+**S22 implementation and evaluation complete — draft PR review pending** (#68):
+- all 38 submitted mic1 tasks converted (18 with a region, 20 explicitly empty) and all 38
+  linked mic2 annotations derived with the independent-clock 3.5 s uncertainty policy
+- 5,612 usable chunks rebuilt from 52 contributing physical sessions / 89 streams; 48 derived
+  mic2 boundary-sensitive windows excluded (four retained MCP pairs are shorter than one 10 s
+  window and therefore contribute no chunks)
+- pair-level seed-42 split: train 4,307 / validation 764 / test 541 chunks, with empty pair-ID
+  intersections and byte-identical manifests across two rebuilds
+- leakage-free `baseline_v6_pair_aware` test: 96.5% accuracy / 0.832 F1 / 92.2% recall;
+  INT8: 97.0% / 0.852 F1 / 90.2% recall on the same 541 chunks
+- no model was published and no production ONNX artifact was replaced
 
 **S19 — Multi-mic recording** (`scripts/record_mics.py`):
 - `RoastMics` CoreAudio Aggregate Device: FIFINE K669B (ch 0, Primary Clock) + ATR2100x (ch 1, Drift Correction)
@@ -222,6 +229,8 @@ python scripts/push_to_hub.py \
 | **baseline_v5 (partial freeze + aug)** | **98.0%** | **0.932** | **97.6%** | **1,435 chunks, 21 recs, 14M trainable, 303-sample test set, 1 FN / 5 FP, precision 89.1%, ROC-AUC 0.9979 (re-measured 12 Jul, #55)** |
 | ONNX FP32, baseline_v5 (Mac, 2 threads) | 98.0% | 0.932 | 97.6% | p50=429ms ✅ (re-benchmarked 12 Jul, #55 — matches AST/PyTorch exactly) |
 | ONNX INT8, baseline_v5 (Mac, 2 threads) | 98.3% | 0.943 | 97.6% | p50=216ms ✅ (re-benchmarked 12 Jul, #55 — 4 FP, marginally better precision than fp32) |
+| **baseline_v6_pair_aware (leakage-free)** | **96.5%** | **0.832** | **92.2%** | **5,612 chunks, 52 contributing physical sessions, 541-sample pair-safe test set, 4 FN / 15 FP, precision 75.8%, ROC-AUC 0.9756; not published** |
+| ONNX INT8, baseline_v6_pair_aware (Mac, 2 threads) | 97.0% | 0.852 | 90.2% | same 541-sample pair-safe test set, 5 FN / 11 FP, precision 80.7%, ROC-AUC 0.9764, p50=642ms; not published |
 | ONNX INT8 (RPi5, 4 threads, fan) | 93.3% | 0.933 | 95.5% | p50=2,070ms ⭐ recommended (pre-baseline_v5 ONNX validation, see note below) |
 | ONNX INT8 (RPi5, 2 threads) | 93.3% | 0.933 | 95.5% | p50=2,436ms ⚠️ thermal throttled (pre-baseline_v5 ONNX validation, see note below) |
 | ONNX INT8 (RPi5, 1 thread) | 93.3% | 0.933 | 95.5% | p50=4,441ms ⚠️ (pre-baseline_v5 ONNX validation, see note below) |

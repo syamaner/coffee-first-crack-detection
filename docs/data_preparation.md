@@ -247,6 +247,12 @@ the manifest `pair_id`, mic number, original filename, and human Label Studio
 provenance. Unknown tasks, mic2 tasks, ambiguous basenames, missing WAVs, and
 existing output files fail closed.
 
+Label Studio may truncate long UUID-prefixed upload names and append a
+seven-character storage suffix. The converter accepts that form only when the
+retained prefix contains a known manifest `pair_id` and mic number and matches
+the start of the expected staged basename. Unknown or inconsistent truncated
+names fail closed; the export must not be edited by hand.
+
 For multi-mic sessions, you annotate **mic1 only** in Label Studio; Step 4
 propagates that annotation to the paired mics.
 

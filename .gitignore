@@ -215,6 +215,8 @@ data/splits/
 experiments/
 exports/
 results/*.log
+# Local leakage-free evaluation outputs are reported in the PR, not committed.
+results/baseline_v6_pair_aware_*
 venv/
 *.onnx
 *.safetensors

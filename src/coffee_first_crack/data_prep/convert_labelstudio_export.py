@@ -23,6 +23,8 @@ import librosa
 
 from coffee_first_crack.data_prep.corpus_manifest import (
     CaptureManifest,
+    SessionRecord,
+    StreamRecord,
     index_manifest_streams,
     resolve_within,
 )
@@ -34,6 +36,11 @@ _LABEL_STUDIO_HASH_RE = re.compile(
     r"^(?:[0-9a-f]{8}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})-(.+)$",
     re.IGNORECASE,
 )
+_LABEL_STUDIO_TRUNCATION_RE = re.compile(
+    r"^(?P<truncated>.+)_(?P<suffix>[A-Za-z0-9]{7})\.wav$",
+    re.IGNORECASE,
+)
+_STAGED_MIC_RE = re.compile(r"^(?P<pair_id>[0-9a-f]{32})__mic(?P<mic_num>[12])-")
 
 
 def strip_hash_prefix(filename: str) -> str:
@@ -52,6 +59,64 @@ def strip_hash_prefix(filename: str) -> str:
     if match:
         return match.group(1)
     return filename
+
+
+def resolve_manifest_stream(
+    uploaded_name: str,
+    manifest: CaptureManifest,
+) -> tuple[SessionRecord, StreamRecord]:
+    """Resolve an uploaded filename to exactly one manifest stream.
+
+    Label Studio stores uploads in a Django ``FileField``. Long UUID-prefixed
+    filenames can be truncated and receive a seven-character collision suffix.
+    Exact staged basenames remain the primary lookup. The fallback accepts only
+    that specific truncation shape, requires the immutable pair ID and mic
+    number to agree, and proves the manifest basename starts with the retained
+    prefix.
+
+    Args:
+        uploaded_name: Filename after removing Label Studio's upload hash.
+        manifest: Staged MCP capture manifest.
+
+    Returns:
+        The matching ``(session, stream)`` tuple.
+
+    Raises:
+        ValueError: If the upload is unknown, malformed, or inconsistent with
+            the manifest.
+    """
+    streams_by_basename, sessions_by_pair_id = index_manifest_streams(manifest)
+    exact = streams_by_basename.get(uploaded_name)
+    if exact is not None:
+        return exact
+
+    truncation_match = _LABEL_STUDIO_TRUNCATION_RE.fullmatch(uploaded_name)
+    if truncation_match is None:
+        raise ValueError(
+            f"Label Studio task is not present in the capture manifest: {uploaded_name}"
+        )
+    truncated = truncation_match.group("truncated")
+    staged_match = _STAGED_MIC_RE.match(truncated)
+    if staged_match is None:
+        raise ValueError(
+            f"Label Studio task is not present in the capture manifest: {uploaded_name}"
+        )
+
+    pair_id = staged_match.group("pair_id")
+    mic_num = int(staged_match.group("mic_num"))
+    session = sessions_by_pair_id.get(pair_id)
+    if session is None:
+        raise ValueError(f"Label Studio task has unknown pair_id {pair_id}: {uploaded_name}")
+    candidates = [stream for stream in session["streams"] if stream["mic_num"] == mic_num]
+    if len(candidates) != 1:
+        raise ValueError(f"Label Studio task has ambiguous mic identity: {uploaded_name}")
+    stream = candidates[0]
+    staged_basename = Path(stream["staged_relative_path"]).name
+    if not staged_basename.startswith(truncated):
+        raise ValueError(
+            f"Label Studio truncated upload does not match the manifest basename: {uploaded_name}"
+        )
+    return session, stream
 
 
 def convert_task(
@@ -93,13 +158,7 @@ def convert_task(
     audio_file = original_name
     sample_rate = SAMPLE_RATE
     if manifest is not None:
-        streams_by_basename, _ = index_manifest_streams(manifest)
-        match = streams_by_basename.get(original_name)
-        if match is None:
-            raise ValueError(
-                f"Label Studio task is not present in the capture manifest: {original_name}"
-            )
-        session, stream = match
+        session, stream = resolve_manifest_stream(original_name, manifest)
         if stream["mic_num"] != 1:
             raise ValueError(f"Only mic1 may be human-labelled for MCP sessions: {original_name}")
         staged_audio_path = resolve_within(

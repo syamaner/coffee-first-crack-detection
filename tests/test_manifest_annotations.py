@@ -97,6 +97,65 @@ def test_manifest_conversion_preserves_human_pair_provenance(
     assert converted["provenance"]["annotation_source"] == "human_label_studio"
 
 
+def test_manifest_conversion_resolves_label_studio_truncated_upload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    staging_root = tmp_path / "mcp"
+    manifest = _manifest(staging_root)
+    mic1 = manifest["sessions"][0]["streams"][0]
+    staged_name = Path(mic1["staged_relative_path"]).name
+    audio_path = staging_root / mic1["staged_relative_path"]
+    audio_path.parent.mkdir(parents=True)
+    audio_path.write_bytes(b"stub")
+    monkeypatch.setattr(conversion.librosa, "get_duration", lambda **_: 100.0)
+    truncated_name = f"{staged_name[:-12]}_EsoDqTW.wav"
+
+    converted = conversion.convert_task(
+        {"file_upload": f"deadbeef-{truncated_name}", "annotations": []},
+        tmp_path,
+        manifest,
+    )
+
+    assert converted["pair_id"] == "a" * 32
+    assert converted["audio_file"] == f"mcp/{mic1['staged_relative_path']}"
+
+
+def test_manifest_conversion_rejects_inconsistent_truncated_upload(tmp_path: Path) -> None:
+    manifest = _manifest(tmp_path / "mcp")
+    uploaded_name = f"{'a' * 32}__mic1-unrelated_EsoDqTW.wav"
+
+    with pytest.raises(ValueError, match="does not match the manifest basename"):
+        conversion.resolve_manifest_stream(uploaded_name, manifest)
+
+
+@pytest.mark.parametrize(
+    ("uploaded_name", "message"),
+    [
+        ("unknown.wav", "not present in the capture manifest"),
+        ("unknown_EsoDqTW.wav", "not present in the capture manifest"),
+        (f"{'b' * 32}__mic1-roast_EsoDqTW.wav", "unknown pair_id"),
+    ],
+)
+def test_manifest_conversion_rejects_unresolvable_uploads(
+    tmp_path: Path,
+    uploaded_name: str,
+    message: str,
+) -> None:
+    manifest = _manifest(tmp_path / "mcp")
+
+    with pytest.raises(ValueError, match=message):
+        conversion.resolve_manifest_stream(uploaded_name, manifest)
+
+
+def test_manifest_conversion_rejects_missing_truncated_mic(tmp_path: Path) -> None:
+    manifest = _manifest(tmp_path / "mcp")
+    manifest["sessions"][0]["streams"] = [manifest["sessions"][0]["streams"][1]]
+    uploaded_name = f"{'a' * 32}__mic1-fazenda_EsoDqTW.wav"
+
+    with pytest.raises(ValueError, match="ambiguous mic identity"):
+        conversion.resolve_manifest_stream(uploaded_name, manifest)
+
+
 def test_manifest_derivation_records_uncertainty_and_pair_identity(tmp_path: Path) -> None:
     staging_root = tmp_path / "mcp"
     labels_dir = tmp_path / "labels"
