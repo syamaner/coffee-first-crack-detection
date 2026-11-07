@@ -83,15 +83,12 @@ def group_chunks_by_recording(
 def group_chunks_by_pair(
     input_dir: Path,
     chunk_manifest_path: Path,
-    *,
-    usable_streams_only: bool = False,
 ) -> tuple[dict[str, dict[str, list[Path]]], dict[str, set[str]]]:
     """Group included chunks by physical pair identity.
 
     Args:
         input_dir: Root containing label directories and chunk WAVs.
         chunk_manifest_path: JSONL manifest emitted by ``chunk_audio``.
-        usable_streams_only: Count only streams with included chunks.
 
     Returns:
         ``(groups, recordings_by_pair)`` where groups have the same label-file
@@ -151,8 +148,7 @@ def group_chunks_by_pair(
                     "Source checksum is assigned to multiple pair IDs: "
                     f"{source_audio_sha256} -> {previous_pair!r}, {pair_id!r}"
                 )
-            if included or not usable_streams_only:
-                recordings_by_pair[pair_id].add(recording_id)
+            recordings_by_pair[pair_id].add(recording_id)
             if not included:
                 continue
             if Path(filename).name != filename:
@@ -497,7 +493,7 @@ def _preserve_to_output(
     if output_dir.resolve().is_relative_to(input_dir.resolve()):
         raise ValueError("Output must not be inside the input chunk tree")
     prior, prior_hash = _load_prior(prior_path)
-    groups, streams = group_chunks_by_pair(input_dir, manifest, usable_streams_only=True)
+    groups, streams = group_chunks_by_pair(input_dir, manifest)
     assignments, unassigned, missing = preserve_pair_assignments(prior, set(groups))
     assigned = {pair for pairs in assignments.values() for pair in pairs}
     assigned_groups = {pair: groups[pair] for pair in sorted(assigned)}

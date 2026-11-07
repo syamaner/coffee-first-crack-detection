@@ -384,8 +384,8 @@ when labels, stream availability, or chunk ordering change. The default route
 above retains its existing seeded behaviour.
 
 New pairs are excluded, never silently assigned. Missing prior pairs are reported.
-`split_report.md` and `split_integrity.json` count only assigned, currently usable
-pairs, streams and chunks. The additional `split_assignment_report.json` records
+`split_report.md` and `split_integrity.json` count only assigned pairs, their source
+stream identities (including streams with excluded chunks), and usable chunks. The additional `split_assignment_report.json` records
 sorted excluded pair IDs and their source stream IDs, missing prior IDs, current
 per-split counts, the prior-report hash, and `fresh_holdout: false`. Zero assigned
 chunks produce an honest empty split. Exclusion does not establish a fresh

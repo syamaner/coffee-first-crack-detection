@@ -56,7 +56,7 @@ def corpus(root: Path, *, reverse: bool = False, changed: bool = False) -> Path:
                     "included": True,
                 }
             )
-    # A declared but excluded stream must not inflate current usable counts.
+    # Excluded streams retain source identity for an assigned physical pair.
     records.append(
         {
             "chunk_filename": "excluded.wav",
@@ -120,9 +120,11 @@ def test_membership_counts_and_determinism(
         invoke(monkeypatch, source, output, prior, "--seed", str(seed), "--train", "-9")
         integrity = json.loads((output / "split_integrity.json").read_text())
         report = json.loads((output / "split_assignment_report.json").read_text())
+        assert report["schema_version"] == 1
+        assert report["assignment_mode"] == "preserved"
         assert integrity["integrity_passed"] is True
         assert integrity["physical_session_count"] == 3
-        assert integrity["stream_recording_count"] == (9 if changed else 6)
+        assert integrity["stream_recording_count"] == (10 if changed else 7)
         assert all(value == [] for value in integrity["pair_id_intersections"].values())
         assert (
             report["prior_split_integrity_sha256"] == hashlib.sha256(prior.read_bytes()).hexdigest()
@@ -147,7 +149,8 @@ def test_membership_counts_and_determinism(
             assert report["splits"][name]["chunk_count"] == len(copied)
         markdown = (output / "split_report.md").read_text()
         assert f"**Total chunks**: {9 if changed else 6}" in markdown
-        assert "new-pair" not in markdown and "excluded-stream" not in markdown
+        assert "new-pair" not in markdown
+        assert "excluded-stream" in markdown
     assert hashes(outputs[0]) == hashes(outputs[1])
     assert hashes(source) == before
 
@@ -190,6 +193,9 @@ def malformed_documents() -> list[object]:
         document = prior_document()
         document["splits"]["train"]["pair_ids"] = value
         documents.append(document)
+    document = prior_document()
+    del document["splits"]["validation"]
+    documents.append(document)
     for key in ("schema_version", "strategy", "integrity_passed", "splits"):
         document = prior_document()
         del document[key]
@@ -441,3 +447,104 @@ def test_default_seeded_bytes_match_bound_base(
     assert integrity["splits"]["validation"]["pair_ids"] == ["legacy-test"]
     assert integrity["splits"]["test"]["pair_ids"] == ["legacy-val"]
     assert not (output / "split_assignment_report.json").exists()
+
+
+def test_parent_changed_after_absence_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refuse a parent replaced with a file after the absence observation."""
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    output = parent / "out"
+    original = Path.lstat
+
+    def replace_parent(path: Path) -> os.stat_result:
+        if path == output:
+            parent.rmdir()
+            parent.write_bytes(b"raced parent")
+            raise FileNotFoundError(path)
+        return original(path)
+
+    monkeypatch.setattr(Path, "lstat", replace_parent)
+    with pytest.raises(NotADirectoryError):
+        require_absent_output_dir(output)
+    assert parent.read_bytes() == b"raced parent"
+
+
+def test_reordered_manifest_report_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = corpus(tmp_path / "input")
+    prior = write_prior(tmp_path)
+    invoke(monkeypatch, source, tmp_path / "out1", prior)
+    manifest = source / "chunk_manifest.jsonl"
+    manifest.write_text("\n".join(reversed(manifest.read_text().splitlines())) + "\n")
+    invoke(monkeypatch, source, tmp_path / "out2", prior, "--seed", "987", "--test", "9")
+    assert hashes(tmp_path / "out1") == hashes(tmp_path / "out2")
+
+
+def test_json_null_rejected_before_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = corpus(tmp_path / "input")
+    prior = tmp_path / "prior.json"
+    prior.write_text("null")
+    with pytest.raises(SystemExit):
+        invoke(monkeypatch, source, tmp_path / "out", prior)
+    assert not (tmp_path / "out").exists()
+
+
+def test_preserved_source_streams_match_existing_report_reader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep excluded mic2 exposure identity while copying only usable mic1."""
+    from scripts.evaluate_mcp_heldout import _split_recording_ids
+
+    source = tmp_path / "input"
+    label_dir = source / "first_crack"
+    label_dir.mkdir(parents=True)
+    mic1_bytes = b"synthetic included mic1"
+    mic2_hash = hashlib.sha256(b"synthetic excluded mic2").hexdigest()
+    mic1 = label_dir / "mic1_w0000.0.wav"
+    mic1.write_bytes(mic1_bytes)
+    records = [
+        {
+            "chunk_filename": filename,
+            "pair_id": "legacy-train",
+            "recording_id": stream,
+            "source_audio_sha256": digest,
+            "label": "first_crack",
+            "included": included,
+        }
+        for filename, stream, digest, included in (
+            (mic1.name, "mic1", hashlib.sha256(mic1_bytes).hexdigest(), True),
+            ("mic2_w0000.0.wav", "mic2", mic2_hash, False),
+        )
+    ]
+    manifest = source / "chunk_manifest.jsonl"
+    manifest.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    before = hashes(source)
+    prior = write_prior(tmp_path)
+    output = tmp_path / "out"
+    invoke(monkeypatch, source, output, prior)
+    pair_ids, identities, source_hashes = _split_recording_ids(
+        output / "split_integrity.json",
+        manifest,
+    )
+    assert pair_ids == {"legacy-train"}
+    assert identities == {("legacy-train", "mic1"), ("legacy-train", "mic2")}
+    assert source_hashes == {record["source_audio_sha256"] for record in records}
+    report = json.loads((output / "split_assignment_report.json").read_text())
+    integrity = json.loads((output / "split_integrity.json").read_text())
+    assert integrity["stream_recording_count"] == 2
+    assert integrity["splits"]["train"]["stream_recording_count"] == 2
+    assert report["splits"]["train"]["stream_recording_count"] == 2
+    assert report["splits"]["train"]["chunk_count"] == 1
+    copied = list(output.rglob("*.wav"))
+    assert len(copied) == 1
+    assert copied[0].read_bytes() == mic1_bytes
+    assert hashes(source) == before
