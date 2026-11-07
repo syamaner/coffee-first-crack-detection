@@ -109,18 +109,17 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
 - [x] S23 [#70](https://github.com/syamaner/coffee-first-crack-detection/issues/70): Preserve established recording-group split assignments
   - Opt-in prior-integrity membership preservation, current counts and explicit exclusions
   - Fresh exclusive output, deterministic assignment report and synthetic behavioural coverage
-  - Software implementation complete; independent review and protected delivery pending
 - [ ] S24 [#71](https://github.com/syamaner/coffee-first-crack-detection/issues/71): Reviewed provenance dispatch (separate contract and slice pending)
 
 ---
 
 ## Active Context
 
-**S23/#70 software implementation complete; review and protected delivery pending.**
+**S23/#70 split assignment preservation implemented.**
 The opt-in splitter preserves prior pair membership when rebuilding usable chunks,
 excludes unassigned groups, reports missing groups and current counts, and requires
 fresh exclusive output. Synthetic tests use no private corpus or hardware. S24/#71
-reviewed provenance remains pending. The existing fresh full-roast holdout and
+reviewed provenance and private-corpus execution remain pending. The existing fresh full-roast holdout and
 candidate-qualification boundaries below remain pending and unchanged.
 
 **Phase 7 complete.** S19 (#46) + S20 (#47) delivered in PR #48.
