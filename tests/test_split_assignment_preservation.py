@@ -497,12 +497,18 @@ def test_json_null_rejected_before_writes(
     assert not (tmp_path / "out").exists()
 
 
+@pytest.mark.parametrize(
+    ("split_name", "pair"),
+    [("train", "legacy-train"), ("validation", "legacy-val"), ("test", "legacy-test")],
+)
 def test_preserved_source_streams_match_existing_report_reader(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    split_name: str,
+    pair: str,
 ) -> None:
     """Keep excluded mic2 exposure identity while copying only usable mic1."""
-    from scripts.evaluate_mcp_heldout import _split_recording_ids
+    from scripts.evaluate_mcp_heldout import _split_recording_ids, discover_heldout_recordings
 
     source = tmp_path / "input"
     label_dir = source / "first_crack"
@@ -514,7 +520,7 @@ def test_preserved_source_streams_match_existing_report_reader(
     records = [
         {
             "chunk_filename": filename,
-            "pair_id": "legacy-train",
+            "pair_id": pair,
             "recording_id": stream,
             "source_audio_sha256": digest,
             "label": "first_crack",
@@ -535,16 +541,129 @@ def test_preserved_source_streams_match_existing_report_reader(
         output / "split_integrity.json",
         manifest,
     )
-    assert pair_ids == {"legacy-train"}
-    assert identities == {("legacy-train", "mic1"), ("legacy-train", "mic2")}
+    assert pair_ids == {pair}
+    assert identities == {(pair, "mic1"), (pair, "mic2")}
     assert source_hashes == {record["source_audio_sha256"] for record in records}
     report = json.loads((output / "split_assignment_report.json").read_text())
     integrity = json.loads((output / "split_integrity.json").read_text())
     assert integrity["stream_recording_count"] == 2
-    assert integrity["splits"]["train"]["stream_recording_count"] == 2
-    assert report["splits"]["train"]["stream_recording_count"] == 2
-    assert report["splits"]["train"]["chunk_count"] == 1
+    assert integrity["splits"][split_name]["stream_recording_count"] == 2
+    assert report["splits"][split_name]["stream_recording_count"] == 2
+    assert report["splits"][split_name]["chunk_count"] == 1
     copied = list(output.rglob("*.wav"))
     assert len(copied) == 1
     assert copied[0].read_bytes() == mic1_bytes
     assert hashes(source) == before
+
+    assert integrity["splits"][split_name]["pair_ids"] == [pair]
+    assert report["fresh_holdout"] is False
+    dataset_manifest = tmp_path / "dataset_manifest.json"
+    dataset_manifest.write_text(json.dumps({"sessions": []}))
+    holdout_manifest = tmp_path / "holdout_manifest.json"
+    holdout_manifest.write_text(
+        json.dumps(
+            {
+                "source_root": str(source.resolve()),
+                "sessions": [{"pair_id": pair}],
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="already appears in a dataset split"):
+        discover_heldout_recordings(
+            split_integrity_path=output / "split_integrity.json",
+            chunk_manifest_path=manifest,
+            dataset_capture_manifest_path=dataset_manifest,
+            holdout_capture_manifest_path=holdout_manifest,
+            label_dirs=(),
+            pair_ids={pair},
+            window_seconds=10.0,
+        )
+
+
+def test_prior_size_limit_precedes_read_and_decode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Reject a sparse oversized report by size, before any unbounded read."""
+    assert splitter._MAX_PRIOR_BYTES == 16 * 1024 * 1024
+    source = corpus(tmp_path / "input")
+    prior = write_prior(tmp_path)
+    with prior.open("r+b") as handle:
+        handle.truncate(splitter._MAX_PRIOR_BYTES + 1)
+    with pytest.raises(SystemExit) as error:
+        invoke(monkeypatch, source, tmp_path / "out", prior)
+    assert error.value.code == 1
+    assert "exceeds 16 MiB maximum" in capsys.readouterr().err
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize("grow", [False, True])
+def test_prior_read_bound_and_growth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    grow: bool,
+) -> None:
+    """Inspect actual read size; growth remains valid JSON and must hit size guard."""
+    from typing import BinaryIO
+
+    source = corpus(tmp_path / "input")
+    prior = write_prior(tmp_path)
+    original_payload = prior.read_bytes()
+    cap = 4096
+    monkeypatch.setattr(splitter, "_MAX_PRIOR_BYTES", cap)
+    original_fdopen = splitter.os.fdopen
+    original_fstat = splitter.os.fstat
+    read_sizes: list[int] = []
+    returned_sizes: list[int] = []
+
+    class ReadProbe:
+        """Observe the production descriptor reader without replacing its bytes."""
+
+        def __init__(self, handle: BinaryIO) -> None:
+            self.handle = handle
+
+        def __enter__(self) -> ReadProbe:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self.handle.close()
+
+        def fileno(self) -> int:
+            return self.handle.fileno()
+
+        def read(self, size: int = -1) -> bytes:
+            read_sizes.append(size)
+            result = self.handle.read(size)
+            returned_sizes.append(len(result))
+            return result
+
+    def observe(descriptor: int, mode: str) -> ReadProbe:
+        return ReadProbe(original_fdopen(descriptor, mode))
+
+    def inspect_then_grow(descriptor: int) -> os.stat_result:
+        metadata = original_fstat(descriptor)
+        if grow:
+            with prior.open("ab") as writer:
+                writer.write(b" " * (cap + 1))
+        return metadata
+
+    monkeypatch.setattr(splitter.os, "fdopen", observe)
+    monkeypatch.setattr(splitter.os, "fstat", inspect_then_grow)
+    if grow:
+        with pytest.raises(SystemExit) as error:
+            invoke(monkeypatch, source, tmp_path / "out", prior)
+        assert error.value.code == 1
+        assert "exceeds 16 MiB maximum" in capsys.readouterr().err
+        assert not (tmp_path / "out").exists()
+        assert returned_sizes == [cap + 1]
+        assert json.loads(prior.read_bytes()) == json.loads(original_payload)
+    else:
+        invoke(monkeypatch, source, tmp_path / "out", prior)
+        report = json.loads((tmp_path / "out" / "split_assignment_report.json").read_text())
+        assert (
+            report["prior_split_integrity_sha256"] == hashlib.sha256(original_payload).hexdigest()
+        )
+        assert returned_sizes == [len(original_payload)]
+    assert read_sizes == [cap + 1]

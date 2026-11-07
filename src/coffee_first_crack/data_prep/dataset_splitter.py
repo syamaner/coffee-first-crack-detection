@@ -31,6 +31,7 @@ from sklearn.model_selection import train_test_split
 from coffee_first_crack.data_prep.output_paths import require_absent_output_dir
 
 logger = logging.getLogger(__name__)
+_MAX_PRIOR_BYTES = 16 * 1024 * 1024
 _CHUNK_LABELS = frozenset({"first_crack", "no_first_crack"})
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -480,9 +481,14 @@ def _load_prior(path: Path) -> tuple[dict[str, list[str]], str]:
     # O_NONBLOCK prevents a raced FIFO from hanging before fstat can reject it.
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor, "rb") as handle:
-        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+        metadata = os.fstat(handle.fileno())
+        if not stat.S_ISREG(metadata.st_mode):
             raise ValueError("Prior integrity must be a regular non-symlink file")
-        payload = handle.read()
+        if metadata.st_size > _MAX_PRIOR_BYTES:
+            raise ValueError("Prior integrity exceeds 16 MiB maximum")
+        payload = handle.read(_MAX_PRIOR_BYTES + 1)
+        if len(payload) > _MAX_PRIOR_BYTES:
+            raise ValueError("Prior integrity exceeds 16 MiB maximum")
     return validate_prior_assignments(json.loads(payload)), hashlib.sha256(payload).hexdigest()
 
 

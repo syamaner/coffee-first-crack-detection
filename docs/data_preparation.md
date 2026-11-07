@@ -377,7 +377,9 @@ python -m coffee_first_crack.data_prep.dataset_splitter \
 ```
 
 The prior report must declare schema version 1, `pair_id` strategy, passed
-integrity, and disjoint train/validation/test pair IDs. Its exact loaded bytes
+integrity, and disjoint train/validation/test pair IDs. The preservation input
+is limited to 16 MiB, with a bounded read that also rejects growth beyond the
+limit. Its exact loaded bytes
 are bound by SHA-256. Current usable chunks retain their original pair's split;
 validation maps to `val/`. Seed and ratios do not affect this route, including
 when labels, stream availability, or chunk ordering change. The default route
