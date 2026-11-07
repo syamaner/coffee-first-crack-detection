@@ -15,15 +15,20 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
+import os
 import re
 import shutil
+import stat
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, cast
 
 from sklearn.model_selection import train_test_split
+
+from coffee_first_crack.data_prep.output_paths import require_absent_output_dir
 
 logger = logging.getLogger(__name__)
 _CHUNK_LABELS = frozenset({"first_crack", "no_first_crack"})
@@ -78,12 +83,15 @@ def group_chunks_by_recording(
 def group_chunks_by_pair(
     input_dir: Path,
     chunk_manifest_path: Path,
+    *,
+    usable_streams_only: bool = False,
 ) -> tuple[dict[str, dict[str, list[Path]]], dict[str, set[str]]]:
     """Group included chunks by physical pair identity.
 
     Args:
         input_dir: Root containing label directories and chunk WAVs.
         chunk_manifest_path: JSONL manifest emitted by ``chunk_audio``.
+        usable_streams_only: Count only streams with included chunks.
 
     Returns:
         ``(groups, recordings_by_pair)`` where groups have the same label-file
@@ -143,7 +151,8 @@ def group_chunks_by_pair(
                     "Source checksum is assigned to multiple pair IDs: "
                     f"{source_audio_sha256} -> {previous_pair!r}, {pair_id!r}"
                 )
-            recordings_by_pair[pair_id].add(recording_id)
+            if included or not usable_streams_only:
+                recordings_by_pair[pair_id].add(recording_id)
             if not included:
                 continue
             if Path(filename).name != filename:
@@ -295,6 +304,8 @@ def generate_split_report(
     val_counts: dict[str, int],
     test_counts: dict[str, int],
     recordings_by_pair: dict[str, set[str]] | None = None,
+    *,
+    exclusive: bool = False,
 ) -> None:
     """Generate a markdown split report.
 
@@ -308,6 +319,7 @@ def generate_split_report(
         val_counts: Validation label counts.
         test_counts: Test label counts.
         recordings_by_pair: Physical pair-to-stream identities.
+        exclusive: Refuse to overwrite reports in preservation mode.
     """
     total_train = sum(train_counts.values())
     total_val = sum(val_counts.values())
@@ -362,7 +374,8 @@ def generate_split_report(
         lines.append(f"| {name} | {fc} | {nfc} | {total} | {pct:.1f}% |")
 
     report_path = output_dir / "split_report.md"
-    report_path.write_text("\n".join(lines) + "\n")
+    with report_path.open("x" if exclusive else "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
     print(f"\n📊 Split report saved to: {report_path}")
 
     train_pairs = set(train_recs)
@@ -403,8 +416,146 @@ def generate_split_report(
         "integrity_passed": True,
     }
     integrity_path = output_dir / "split_integrity.json"
-    integrity_path.write_text(json.dumps(integrity, indent=2, sort_keys=True) + "\n")
+    with integrity_path.open("x" if exclusive else "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(integrity, indent=2, sort_keys=True) + "\n")
     print(f"🔒 Pair integrity report saved to: {integrity_path}")
+
+
+def validate_prior_assignments(document: object) -> dict[str, list[str]]:
+    """Validate decoded prior pair membership without trusting historical counts.
+
+    Args:
+        document: Decoded prior integrity JSON.
+
+    Returns:
+        Disjoint pair IDs indexed by canonical split name.
+
+    Raises:
+        ValueError: If schema or membership is ambiguous or invalid.
+    """
+    if (
+        not isinstance(document, dict)
+        or type(document.get("schema_version")) is not int
+        or document.get("schema_version") != 1
+        or document.get("strategy") != "pair_id"
+        or document.get("integrity_passed") is not True
+    ):
+        raise ValueError("Prior integrity must be schema_version 1, pair_id, integrity_passed true")
+    splits = document.get("splits")
+    if not isinstance(splits, dict) or set(splits) != {"train", "validation", "test"}:
+        raise ValueError("Prior splits must contain exactly train/validation/test")
+    assignments: dict[str, list[str]] = {}
+    seen: set[str] = set()
+    for name in ("train", "validation", "test"):
+        split = splits[name]
+        pairs = split.get("pair_ids") if isinstance(split, dict) else None
+        if not isinstance(pairs, list) or any(
+            not isinstance(pair, str) or not pair for pair in pairs
+        ):
+            raise ValueError("Prior pair_ids must be lists of nonempty strings")
+        if len(set(pairs)) != len(pairs) or seen.intersection(pairs):
+            raise ValueError("Prior pair_ids must be unique and disjoint")
+        seen.update(pairs)
+        assignments[name] = sorted(pairs)
+    return assignments
+
+
+def preserve_pair_assignments(
+    prior: dict[str, list[str]], current_pair_ids: set[str]
+) -> tuple[dict[str, list[str]], list[str], list[str]]:
+    """Project validated membership onto current usable pair identities.
+
+    Args:
+        prior: Validated canonical split memberships.
+        current_pair_ids: Identities with usable chunks.
+
+    Returns:
+        Current assignments, unassigned IDs, and missing prior IDs, all sorted.
+    """
+    known = {pair for pairs in prior.values() for pair in pairs}
+    return (
+        {name: sorted(set(pairs) & current_pair_ids) for name, pairs in prior.items()},
+        sorted(current_pair_ids - known),
+        sorted(known - current_pair_ids),
+    )
+
+
+def _load_prior(path: Path) -> tuple[dict[str, list[str]], str]:
+    # O_NONBLOCK prevents a raced FIFO from hanging before fstat can reject it.
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise ValueError("Prior integrity must be a regular non-symlink file")
+        payload = handle.read()
+    return validate_prior_assignments(json.loads(payload)), hashlib.sha256(payload).hexdigest()
+
+
+def _preserve_to_output(
+    input_dir: Path, output_dir: Path, manifest: Path, prior_path: Path
+) -> None:
+    require_absent_output_dir(output_dir)
+    if output_dir.resolve().is_relative_to(input_dir.resolve()):
+        raise ValueError("Output must not be inside the input chunk tree")
+    prior, prior_hash = _load_prior(prior_path)
+    groups, streams = group_chunks_by_pair(input_dir, manifest, usable_streams_only=True)
+    assignments, unassigned, missing = preserve_pair_assignments(prior, set(groups))
+    assigned = {pair for pairs in assignments.values() for pair in pairs}
+    assigned_groups = {pair: groups[pair] for pair in sorted(assigned)}
+    assigned_streams = {pair: streams[pair] for pair in sorted(assigned)}
+    output_dir.mkdir(parents=False, exist_ok=False)
+    counts: dict[str, dict[str, int]] = {}
+    for name, pairs in assignments.items():
+        split_dir = output_dir / ("val" if name == "validation" else name)
+        split_dir.mkdir()
+        counts[name] = {}
+        for label in sorted(_CHUNK_LABELS):
+            label_dir = split_dir / label
+            label_dir.mkdir()
+            count = 0
+            for pair in pairs:
+                for source in sorted(groups[pair].get(label, [])):
+                    with (
+                        source.open("rb") as reader,
+                        (label_dir / source.name).open("xb") as writer,
+                    ):
+                        shutil.copyfileobj(reader, writer)
+                    count += 1
+            counts[name][label] = count
+    # Reports are published only after every copy has completed successfully.
+    generate_split_report(
+        output_dir,
+        assigned_groups,
+        assignments["train"],
+        assignments["validation"],
+        assignments["test"],
+        counts["train"],
+        counts["validation"],
+        counts["test"],
+        assigned_streams,
+        exclusive=True,
+    )
+    report = {
+        "schema_version": 1,
+        "assignment_mode": "preserved",
+        "prior_split_integrity_sha256": prior_hash,
+        "seed_and_ratios_used": False,
+        "fresh_holdout": False,
+        "unassigned_pair_ids": unassigned,
+        "unassigned_source_stream_ids": {pair: sorted(streams[pair]) for pair in unassigned},
+        "missing_prior_pair_ids": missing,
+        "splits": {
+            name: {
+                "pair_ids": pairs,
+                "physical_session_count": len(pairs),
+                "stream_recording_count": sum(len(streams[pair]) for pair in pairs),
+                "chunk_count": sum(counts[name].values()),
+                "label_counts": counts[name],
+            }
+            for name, pairs in assignments.items()
+        },
+    }
+    with (output_dir / "split_assignment_report.json").open("x", encoding="utf-8") as handle:
+        handle.write(json.dumps(report, indent=2, sort_keys=True) + "\n")
 
 
 def main() -> None:
@@ -434,7 +585,25 @@ def main() -> None:
         default=None,
         help="chunk_manifest.jsonl (defaults to <input>/chunk_manifest.jsonl)",
     )
+    parser.add_argument(
+        "--preserve-assignments",
+        type=Path,
+        default=None,
+        help="Prior split_integrity.json; preserve membership and exclude new pairs",
+    )
     args = parser.parse_args()
+    if args.preserve_assignments is not None:
+        try:
+            _preserve_to_output(
+                args.input,
+                args.output,
+                args.chunk_manifest or args.input / "chunk_manifest.jsonl",
+                args.preserve_assignments,
+            )
+        except (OSError, ValueError, RuntimeError) as exc:
+            parser.exit(1, f"Preservation failed: {exc}\n")
+        print("Preserved assignments; seed and ratios were not used; fresh_holdout=false")
+        return
 
     total_ratio = args.train + args.val + args.test
     if not (0.99 <= total_ratio <= 1.01):
