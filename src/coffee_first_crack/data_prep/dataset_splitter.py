@@ -23,6 +23,7 @@ import re
 import shutil
 import stat
 from collections import defaultdict
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, cast
 
@@ -492,6 +493,31 @@ def _load_prior(path: Path) -> tuple[dict[str, list[str]], str]:
     return validate_prior_assignments(json.loads(payload)), hashlib.sha256(payload).hexdigest()
 
 
+def _copy_preserved_chunk(
+    root_descriptor: int, label: str, filename: str, destination: Path
+) -> None:
+    # Anchor every input component to the selected root; no path reopen can
+    # follow a replaced label directory or chunk link outside that root.
+    with ExitStack() as handles:
+        label_descriptor = os.open(
+            label,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=root_descriptor,
+        )
+        handles.callback(os.close, label_descriptor)
+        source_descriptor = os.open(
+            filename,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=label_descriptor,
+        )
+        handles.callback(os.close, source_descriptor)
+        if not stat.S_ISREG(os.fstat(source_descriptor).st_mode):
+            raise ValueError("Preserved source chunk must be a regular non-symlink file")
+        reader = handles.enter_context(os.fdopen(source_descriptor, "rb", closefd=False))
+        writer = handles.enter_context(destination.open("xb"))
+        shutil.copyfileobj(reader, writer)
+
+
 def _preserve_to_output(
     input_dir: Path, output_dir: Path, manifest: Path, prior_path: Path
 ) -> None:
@@ -499,30 +525,33 @@ def _preserve_to_output(
     if output_dir.resolve().is_relative_to(input_dir.resolve()):
         raise ValueError("Output must not be inside the input chunk tree")
     prior, prior_hash = _load_prior(prior_path)
-    groups, streams = group_chunks_by_pair(input_dir, manifest)
-    assignments, unassigned, missing = preserve_pair_assignments(prior, set(groups))
-    assigned = {pair for pairs in assignments.values() for pair in pairs}
-    assigned_groups = {pair: groups[pair] for pair in sorted(assigned)}
-    assigned_streams = {pair: streams[pair] for pair in sorted(assigned)}
-    output_dir.mkdir(parents=False, exist_ok=False)
-    counts: dict[str, dict[str, int]] = {}
-    for name, pairs in assignments.items():
-        split_dir = output_dir / ("val" if name == "validation" else name)
-        split_dir.mkdir()
-        counts[name] = {}
-        for label in sorted(_CHUNK_LABELS):
-            label_dir = split_dir / label
-            label_dir.mkdir()
-            count = 0
-            for pair in pairs:
-                for source in sorted(groups[pair].get(label, [])):
-                    with (
-                        source.open("rb") as reader,
-                        (label_dir / source.name).open("xb") as writer,
-                    ):
-                        shutil.copyfileobj(reader, writer)
-                    count += 1
-            counts[name][label] = count
+    with ExitStack() as sources:
+        root_descriptor = os.open(
+            input_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
+        )
+        sources.callback(os.close, root_descriptor)
+        groups, streams = group_chunks_by_pair(input_dir, manifest)
+        assignments, unassigned, missing = preserve_pair_assignments(prior, set(groups))
+        assigned = {pair for pairs in assignments.values() for pair in pairs}
+        assigned_groups = {pair: groups[pair] for pair in sorted(assigned)}
+        assigned_streams = {pair: streams[pair] for pair in sorted(assigned)}
+        output_dir.mkdir(parents=False, exist_ok=False)
+        counts: dict[str, dict[str, int]] = {}
+        for name, pairs in assignments.items():
+            split_dir = output_dir / ("val" if name == "validation" else name)
+            split_dir.mkdir()
+            counts[name] = {}
+            for label in sorted(_CHUNK_LABELS):
+                label_dir = split_dir / label
+                label_dir.mkdir()
+                count = 0
+                for pair in pairs:
+                    for source in sorted(groups[pair].get(label, [])):
+                        _copy_preserved_chunk(
+                            root_descriptor, label, source.name, label_dir / source.name
+                        )
+                        count += 1
+                counts[name][label] = count
     # Reports are published only after every copy has completed successfully.
     generate_split_report(
         output_dir,

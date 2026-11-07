@@ -615,6 +615,7 @@ def test_prior_read_bound_and_growth(
     monkeypatch.setattr(splitter, "_MAX_PRIOR_BYTES", cap)
     original_fdopen = splitter.os.fdopen
     original_fstat = splitter.os.fstat
+    prior_identity = prior.stat()
     read_sizes: list[int] = []
     returned_sizes: list[int] = []
 
@@ -639,12 +640,19 @@ def test_prior_read_bound_and_growth(
             returned_sizes.append(len(result))
             return result
 
-    def observe(descriptor: int, mode: str) -> ReadProbe:
-        return ReadProbe(original_fdopen(descriptor, mode))
+    def observe(descriptor: int, mode: str, *, closefd: bool = True) -> ReadProbe | BinaryIO:
+        metadata = original_fstat(descriptor)
+        handle = original_fdopen(descriptor, mode, closefd=closefd)
+        if (metadata.st_dev, metadata.st_ino) == (prior_identity.st_dev, prior_identity.st_ino):
+            return ReadProbe(handle)
+        return handle
 
     def inspect_then_grow(descriptor: int) -> os.stat_result:
         metadata = original_fstat(descriptor)
-        if grow:
+        if grow and (metadata.st_dev, metadata.st_ino) == (
+            prior_identity.st_dev,
+            prior_identity.st_ino,
+        ):
             with prior.open("ab") as writer:
                 writer.write(b" " * (cap + 1))
         return metadata
@@ -667,3 +675,63 @@ def test_prior_read_bound_and_growth(
         )
         assert returned_sizes == [len(original_payload)]
     assert read_sizes == [cap + 1]
+
+
+@pytest.mark.parametrize("swap", ["file-link", "label-link", "fifo", "directory"])
+def test_source_swap_fails_before_outside_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    swap: str,
+) -> None:
+    """Reject link/component swaps and nonregular sources after real validation."""
+    source = corpus(tmp_path / "input")
+    prior = write_prior(tmp_path)
+    output = tmp_path / "out"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = b"OUTSIDE SYNTHETIC MARKER - NEVER COPY"
+    for path in (source / "first_crack").glob("*.wav"):
+        (outside / path.name).write_bytes(marker)
+    before = hashes(outside)
+    original_group = splitter.group_chunks_by_pair
+    original_open = splitter.os.open
+    descriptors: list[int] = []
+
+    def track_open(path: str | Path, flags: int, *args: object, **kwargs: object) -> int:
+        descriptor = original_open(path, flags, *args, **kwargs)
+        descriptors.append(descriptor)
+        return descriptor
+
+    def validate_then_swap(
+        input_dir: Path,
+        manifest: Path,
+    ) -> tuple[dict[str, dict[str, list[Path]]], dict[str, set[str]]]:
+        result = original_group(input_dir, manifest)
+        label = source / "first_crack"
+        victim = label / "legacy-train-mic1_w0000.0.wav"
+        if swap == "label-link":
+            label.rename(source / "original-label")
+            label.symlink_to(outside, target_is_directory=True)
+        else:
+            victim.rename(source / "original-chunk")
+            if swap == "file-link":
+                victim.symlink_to(outside / victim.name)
+            elif swap == "fifo":
+                os.mkfifo(victim)
+            else:
+                victim.mkdir()
+        return result
+
+    monkeypatch.setattr(splitter.os, "open", track_open)
+    monkeypatch.setattr(splitter, "group_chunks_by_pair", validate_then_swap)
+    with pytest.raises(SystemExit) as error:
+        invoke(monkeypatch, source, output, prior)
+    assert error.value.code == 1
+    assert hashes(outside) == before
+    assert all(marker not in path.read_bytes() for path in output.rglob("*.wav"))
+    for name in ("split_report.md", "split_integrity.json", "split_assignment_report.json"):
+        assert not (output / name).exists()
+    assert descriptors
+    for descriptor in descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)

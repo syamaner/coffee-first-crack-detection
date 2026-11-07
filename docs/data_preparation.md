@@ -396,7 +396,9 @@ holdout or qualify any model.
 The output must not exist in any form, including an empty directory or dangling
 symlink, and its parent must already exist. Output inside the input tree is
 refused. All input validation precedes exclusive directory creation; copied
-chunks and reports are also created exclusively. No previous output is erased or
+chunks and reports are also created exclusively. Source chunks are opened through
+a descriptor anchored to the selected input root, with no-follow directory and
+file opens, nonblocking reads and regular-file verification. No previous output is erased or
 overwritten. An I/O failure can leave incomplete fresh output; nothing is erased
 to retry, and incomplete chunk copying never publishes an integrity success.
 Reviewed provenance dispatch (#71) remains pending.
