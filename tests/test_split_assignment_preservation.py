@@ -1174,3 +1174,34 @@ def test_extra_input_link_is_rejected_without_following(
         invoke(monkeypatch, source, tmp_path / "out", prior)
     assert not (tmp_path / "out").exists()
     assert_descriptors_closed(opened)
+
+
+def test_legacy_grouping_requires_its_manifest(tmp_path: Path) -> None:
+    """The unflagged identity authority refuses a missing manifest before reading chunks."""
+    source = corpus(tmp_path / "input")
+    manifest = source / "chunk_manifest.jsonl"
+    manifest.unlink()
+    before = hashes(source)
+    with pytest.raises(FileNotFoundError, match="Pair-aware chunk manifest is required"):
+        splitter.group_chunks_by_pair(source, manifest)
+    assert hashes(source) == before
+
+
+@pytest.mark.parametrize("kind", ["missing", "file", "symlink"])
+def test_legacy_grouping_rejects_nonregular_label_directory(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    """The unchanged legacy path refuses absent, non-directory and linked labels."""
+    source = corpus(tmp_path / "input")
+    label = source / "first_crack"
+    retained = source / "retained-label"
+    label.rename(retained)
+    if kind == "file":
+        label.write_bytes(b"synthetic non-directory sentinel")
+    elif kind == "symlink":
+        label.symlink_to(retained, target_is_directory=True)
+    before = hashes(source)
+    with pytest.raises(ValueError, match="Chunk label directory must be a regular directory"):
+        splitter.group_chunks_by_pair(source, source / "chunk_manifest.jsonl")
+    assert hashes(source) == before
