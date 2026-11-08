@@ -2,7 +2,7 @@
 
 **GitHub Issue**: [#1](https://github.com/syamaner/coffee-first-crack-detection/issues/1)
 **Status**: 🔄 Active — Phase 7 complete (S19 + S20 delivered); recording data collection in progress
-**Last Updated**: 2026-08-16
+**Last Updated**: 2026-11-07
 
 ## Objective
 Create a standalone, HuggingFace-publishable repository for training, evaluating, and publishing the coffee first crack audio detection model. Extracted from the `coffee-roasting` monorepo. Targets M3+ Mac (MPS), RTX 4090 (CUDA), and Raspberry Pi 5 (ONNX/CPU).
@@ -106,9 +106,21 @@ Create a standalone, HuggingFace-publishable repository for training, evaluating
   - Human mic1 Label Studio boundary; deterministic mic2 derivation with uncertainty exclusions
   - Pair-level chunk provenance, splitting, and machine-checkable integrity report
 
+- [x] S23 [#70](https://github.com/syamaner/coffee-first-crack-detection/issues/70): Preserve established recording-group split assignments
+  - Opt-in prior-integrity membership preservation, current counts and explicit exclusions
+  - Fresh exclusive output, deterministic assignment report and synthetic behavioural coverage
+- [ ] S24 [#71](https://github.com/syamaner/coffee-first-crack-detection/issues/71): Reviewed provenance dispatch (separate contract and slice pending)
+
 ---
 
 ## Active Context
+
+**S23/#70 split assignment preservation implemented.**
+The opt-in splitter preserves prior pair membership when rebuilding usable chunks,
+excludes unassigned groups, reports missing groups and current counts, and requires
+fresh exclusive output. Synthetic tests use no private corpus or hardware. S24/#71
+reviewed provenance and private-corpus execution remain pending. The existing fresh full-roast holdout and
+candidate-qualification boundaries below remain pending and unchanged.
 
 **Phase 7 complete.** S19 (#46) + S20 (#47) delivered in PR #48.
 

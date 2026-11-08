@@ -364,6 +364,62 @@ data/splits/
 intersections are empty and reports physical-session counts separately from
 stream/recording counts. The fixed seed makes assignments deterministic.
 
+### Preserve established assignments after rebuilding chunks
+
+To keep an existing split after label corrections or newly usable microphone
+streams, supply its original integrity report and a fresh output path:
+
+```bash
+python -m coffee_first_crack.data_prep.dataset_splitter \
+  --input data/processed \
+  --output data/preserved-splits \
+  --preserve-assignments /path/to/prior/split_integrity.json
+```
+
+The prior report must declare schema version 1, `pair_id` strategy, passed
+integrity, disjoint train/validation/test pair IDs, and no duplicate JSON object
+keys. The preservation input
+is limited to 16 MiB, with a bounded read that also rejects growth beyond the
+limit. Its exact loaded bytes
+are bound by SHA-256. Current usable chunks retain their original pair's split;
+validation maps to `val/`. Seed and ratios do not affect this route, including
+when labels, stream availability, or chunk ordering change. The default route
+above retains its existing seeded behaviour.
+
+New pairs are excluded, never silently assigned. Missing prior pairs are reported.
+`split_report.md` and `split_integrity.json` count only assigned pairs, their source
+stream identities (including streams with excluded chunks), and usable chunks. The additional `split_assignment_report.json` records
+sorted excluded pair IDs and their source stream IDs, missing prior IDs, current
+per-split counts, the prior-report hash, and `fresh_holdout: false`. Zero assigned
+chunks produce an honest empty split. Exclusion does not establish a fresh
+holdout or qualify any model.
+
+The output must not exist in any form, including an empty directory or dangling
+symlink, and its parent must already exist. Output inside the input tree is
+refused. All input validation precedes exclusive directory creation; copied
+chunks and reports are also created exclusively. Manifest validation, chunk
+discovery and copying share one held input root, with no-follow directory/file
+opens, nonblocking reads and regular-file verification. Validated per-chunk
+device/inode metadata is compared with the opened copy source so replacement
+regular files are rejected without keeping per-chunk descriptors open. Output ancestry is
+checked by filesystem identity; case, private-prefix and macOS Data-volume
+firmlink aliases are tested. Deliberate bind mounts of an input subdirectory can
+bypass root-inode ancestry and are outside this boundary. Arbitrary mounts are
+not supported by this check. Output
+parents, split directories, copied files and reports use held directory
+descriptors. Directory bindings and ancestry are checked before and after
+creation and report publication; detected changes fail, and exclusive creates
+prevent overwrites. Concurrent directory renaming between these checks is
+unsupported: this is not an atomic filesystem transaction. Final-component
+symlinks for the selected input root or output parent, and unreadable ancestor
+directories, are conservatively refused. On macOS, select canonical
+`/private/tmp` rather than symlink `/tmp` as the final output parent. The
+assignment sidecar precedes the final integrity marker. These boundaries bind file resolution; they do not
+snapshot concurrent in-place edits to regular files. No previous output is erased or
+overwritten. An I/O failure can leave incomplete fresh output; nothing is erased
+to retry, and incomplete chunk copying never publishes an integrity success.
+Reviewed provenance dispatch (#71) remains pending.
+
 ### Fresh full-recording MCP holdout
 
 Chunk-level test metrics do not prove that a roast produces one correctly timed
