@@ -1205,3 +1205,194 @@ def test_legacy_grouping_rejects_nonregular_label_directory(
     with pytest.raises(ValueError, match="Chunk label directory must be a regular directory"):
         splitter.group_chunks_by_pair(source, source / "chunk_manifest.jsonl")
     assert hashes(source) == before
+
+
+def non_ascii_corpus(root: Path) -> Path:
+    """Add non-ASCII identities without changing source chunk bytes."""
+    source = corpus(root)
+    manifest = source / "chunk_manifest.jsonl"
+    rows = [json.loads(line) for line in manifest.read_text().splitlines()]
+    for row in rows:
+        row["pair_id"] += "-café"
+        row["recording_id"] += "-café"
+    manifest.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    return source
+
+
+def test_manifest_equal_to_input_is_a_regular_file_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = corpus(tmp_path / "input")
+    prior = write_prior(tmp_path)
+    before = hashes(source)
+    opened = tracked_descriptors(monkeypatch)
+    with pytest.raises(SystemExit) as error:
+        invoke(monkeypatch, source, tmp_path / "out", prior, "--chunk-manifest", str(source))
+    assert error.value.code == 1
+    message = capsys.readouterr().err
+    assert "Preservation failed" in message and "regular non-symlink file" in message
+    assert not (tmp_path / "out").exists()
+    assert hashes(source) == before
+    assert_descriptors_closed(opened)
+
+
+@pytest.mark.parametrize("encoding", ["latin-1", "ascii"])
+def test_default_non_ascii_encoding_matches_actual_base(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    encoding: str,
+) -> None:
+    """Match base749c's independently captured non-UTF8 default writing contract."""
+    import io
+
+    source = non_ascii_corpus(tmp_path / "input")
+    output = tmp_path / "out"
+    before = hashes(source)
+    original = io.text_encoding
+
+    def controlled_default(value: str | None, stacklevel: int = 2) -> str:
+        return encoding if value is None or value == "locale" else original(value, stacklevel)
+
+    monkeypatch.setattr(io, "text_encoding", controlled_default)
+    arguments = ("--train", "0.5", "--val", "0.25", "--test", "0.25", "--seed", "42")
+    if encoding == "ascii":
+        with pytest.raises(UnicodeEncodeError):
+            invoke(monkeypatch, source, output, None, *arguments)
+        assert not (output / "split_integrity.json").exists()
+    else:
+        invoke(monkeypatch, source, output, None, *arguments)
+        markdown = (output / "split_report.md").read_bytes()
+        assert b"caf\xe9" in markdown and b"caf\xc3\xa9" not in markdown
+        assert (
+            hashlib.sha256(markdown).hexdigest()
+            == "88a8da9d84a6397763df750ad5727f59761aba6405725c262bfae94b50208303"
+        )
+        assert (
+            hashlib.sha256((output / "split_integrity.json").read_bytes()).hexdigest()
+            == "4ef36641cdf15c04450ee12d5595d364c0d0a4050ed902b3f1caca45952b0be6"
+        )
+    assert hashes(source) == before
+
+
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_different_regular_source_identity_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    kind: str,
+) -> None:
+    """Reject different regular inodes after validation, before copying their bytes."""
+    source = corpus(tmp_path / "input")
+    prior = write_prior(tmp_path)
+    original = splitter.group_chunks_by_pair
+    marker = b"DIFFERENT REGULAR INODE REPLACEMENT"
+    replaced: list[tuple[int, int]] = []
+
+    def replace(
+        input_dir: Path,
+        manifest: Path,
+        *,
+        _bound_input: splitter._BoundChunkInput | None = None,
+    ) -> tuple[dict[str, dict[str, list[Path]]], dict[str, set[str]]]:
+        result = original(input_dir, manifest, _bound_input=_bound_input)
+        label = source / "first_crack"
+        victim = label / "legacy-train-mic1_w0000.0.wav"
+        previous = victim.stat()
+        if kind == "directory":
+            label.rename(source / "retained-label")
+            label.mkdir()
+            for path in (source / "retained-label").iterdir():
+                (label / path.name).write_bytes(marker)
+        else:
+            victim.rename(source / "retained-chunk")
+            victim.write_bytes(marker)
+        current = victim.stat()
+        assert (previous.st_dev, previous.st_ino) != (current.st_dev, current.st_ino)
+        replaced.append((current.st_dev, current.st_ino))
+        return result
+
+    monkeypatch.setattr(splitter, "group_chunks_by_pair", replace)
+    opened = tracked_descriptors(monkeypatch)
+    output = tmp_path / "out"
+    with pytest.raises(SystemExit) as error:
+        invoke(monkeypatch, source, output, prior)
+    assert error.value.code == 1 and replaced
+    assert "Validated chunk filesystem identity changed" in capsys.readouterr().err
+    assert all(marker not in path.read_bytes() for path in output.rglob("*.wav"))
+    for name in ("split_report.md", "split_integrity.json", "split_assignment_report.json"):
+        assert not (output / name).exists()
+    assert_descriptors_closed(opened)
+
+
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_same_inode_link_targets_still_require_no_follow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    """No-follow policy rejects links even when hardlinked target inodes match."""
+    source = corpus(tmp_path / "input")
+    prior = write_prior(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    for path in (source / "first_crack").iterdir():
+        os.link(path, outside / path.name)
+    outside_before = hashes(outside)
+    original = splitter.group_chunks_by_pair
+
+    def replace(
+        input_dir: Path,
+        manifest: Path,
+        *,
+        _bound_input: splitter._BoundChunkInput | None = None,
+    ) -> tuple[dict[str, dict[str, list[Path]]], dict[str, set[str]]]:
+        result = original(input_dir, manifest, _bound_input=_bound_input)
+        label = source / "first_crack"
+        victim = label / "legacy-train-mic1_w0000.0.wav"
+        expected = victim.stat()
+        assert expected.st_ino == (outside / victim.name).stat().st_ino
+        if kind == "directory":
+            label.rename(source / "retained-label")
+            label.symlink_to(outside, target_is_directory=True)
+        else:
+            victim.rename(source / "retained-chunk")
+            victim.symlink_to(outside / victim.name)
+        return result
+
+    monkeypatch.setattr(splitter, "group_chunks_by_pair", replace)
+    opened = tracked_descriptors(monkeypatch)
+    output = tmp_path / "out"
+    with pytest.raises(SystemExit):
+        invoke(monkeypatch, source, output, prior)
+    assert hashes(outside) == outside_before
+    for name in ("split_report.md", "split_integrity.json", "split_assignment_report.json"):
+        assert not (output / name).exists()
+    assert_descriptors_closed(opened)
+
+
+def test_preserved_non_ascii_reports_keep_explicit_utf8(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The preservation callback stays UTF8 even when legacy defaults are ASCII."""
+    import io
+
+    source = non_ascii_corpus(tmp_path / "input")
+    document = prior_document()
+    for split in document["splits"].values():
+        split["pair_ids"] = [pair + "-café" for pair in split["pair_ids"]]
+    prior = write_prior(tmp_path, document)
+    original = io.text_encoding
+
+    def controlled_default(value: str | None, stacklevel: int = 2) -> str:
+        return "ascii" if value is None or value == "locale" else original(value, stacklevel)
+
+    monkeypatch.setattr(io, "text_encoding", controlled_default)
+    output = tmp_path / "out"
+    invoke(monkeypatch, source, output, prior)
+    markdown = (output / "split_report.md").read_bytes()
+    assert b"caf\xc3\xa9" in markdown
+    assert json.loads((output / "split_integrity.json").read_bytes())["integrity_passed"] is True
+    assert len(list(output.rglob("*.wav"))) == 6

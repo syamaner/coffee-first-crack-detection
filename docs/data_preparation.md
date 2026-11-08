@@ -399,8 +399,13 @@ symlink, and its parent must already exist. Output inside the input tree is
 refused. All input validation precedes exclusive directory creation; copied
 chunks and reports are also created exclusively. Manifest validation, chunk
 discovery and copying share one held input root, with no-follow directory/file
-opens, nonblocking reads and regular-file verification. Output ancestry is
-checked by filesystem identity, including case and filesystem aliases. Output
+opens, nonblocking reads and regular-file verification. Validated per-chunk
+device/inode metadata is compared with the opened copy source so replacement
+regular files are rejected without keeping per-chunk descriptors open. Output ancestry is
+checked by filesystem identity; case, private-prefix and macOS Data-volume
+firmlink aliases are tested. Deliberate bind mounts of an input subdirectory can
+bypass root-inode ancestry and are outside this boundary. Arbitrary mounts are
+not supported by this check. Output
 parents, split directories, copied files and reports use held directory
 descriptors so path swaps cannot redirect writes into the input tree. Directory
 bindings are checked throughout publication; the assignment sidecar precedes the

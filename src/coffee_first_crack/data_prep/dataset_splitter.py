@@ -394,7 +394,7 @@ def generate_split_report(
 
     report_path = output_dir / "split_report.md"
     if _write_report is None:
-        with report_path.open("x" if exclusive else "w", encoding="utf-8") as handle:
+        with report_path.open("x" if exclusive else "w") as handle:
             handle.write("\n".join(lines) + "\n")
     else:
         _write_report(report_path.name, "\n".join(lines) + "\n")
@@ -439,7 +439,7 @@ def generate_split_report(
     }
     integrity_path = output_dir / "split_integrity.json"
     if _write_report is None:
-        with integrity_path.open("x" if exclusive else "w", encoding="utf-8") as handle:
+        with integrity_path.open("x" if exclusive else "w") as handle:
             handle.write(json.dumps(integrity, indent=2, sort_keys=True) + "\n")
     else:
         _write_report(integrity_path.name, json.dumps(integrity, indent=2, sort_keys=True) + "\n")
@@ -532,6 +532,8 @@ def _load_prior(path: Path) -> tuple[dict[str, list[str]], str]:
 
 
 def _open_source_file(root: int, parts: tuple[str, ...], handles: ExitStack) -> int:
+    if not parts:
+        raise ValueError("Preserved input must be a regular non-symlink file")
     directory = root
     for component in parts[:-1]:
         directory = os.open(component, _DIRECTORY_FLAGS, dir_fd=directory)
@@ -549,13 +551,18 @@ class _BoundChunkInput:
     def __init__(self, root: int, manifest: int) -> None:
         self._root = root
         self._manifest = manifest
+        self._chunk_identities: dict[tuple[str, str], tuple[int, int]] = {}
 
     def _open_manifest(self) -> TextIO:
         return os.fdopen(os.dup(self._manifest), "r", encoding="utf-8")
 
     def _validate_chunk(self, label: str, filename: str) -> None:
         with ExitStack() as handles:
-            _open_source_file(self._root, (label, filename), handles)
+            descriptor = _open_source_file(self._root, (label, filename), handles)
+            self._chunk_identities[label, filename] = _identity(descriptor)
+
+    def _expected_identity(self, label: str, filename: str) -> tuple[int, int]:
+        return self._chunk_identities[label, filename]
 
     def _filenames(self) -> set[str]:
         filenames: set[str] = set()
@@ -610,10 +617,16 @@ def _exclusive_output_file(directory: int, filename: str, handles: ExitStack) ->
 
 
 def _copy_preserved_chunk(
-    root_descriptor: int, label: str, filename: str, destination_descriptor: int
+    root_descriptor: int,
+    label: str,
+    filename: str,
+    destination_descriptor: int,
+    expected_identity: tuple[int, int],
 ) -> None:
     with ExitStack() as handles:
         source = _open_source_file(root_descriptor, (label, filename), handles)
+        if _identity(source) != expected_identity:
+            raise ValueError("Validated chunk filesystem identity changed")
         destination = _exclusive_output_file(destination_descriptor, filename, handles)
         reader = handles.enter_context(os.fdopen(source, "rb", closefd=False))
         writer = handles.enter_context(os.fdopen(destination, "wb", closefd=False))
@@ -644,9 +657,8 @@ def _preserve_to_output(
                 raise ValueError("Chunk manifest must be a regular file")
         else:
             manifest_descriptor = _open_source_file(root, relative_manifest, handles)
-        groups, streams = group_chunks_by_pair(
-            input_dir, manifest, _bound_input=_BoundChunkInput(root, manifest_descriptor)
-        )
+        bound_input = _BoundChunkInput(root, manifest_descriptor)
+        groups, streams = group_chunks_by_pair(input_dir, manifest, _bound_input=bound_input)
         assignments, unassigned, missing = preserve_pair_assignments(prior, set(groups))
         assigned = {pair for pairs in assignments.values() for pair in pairs}
         assigned_groups = {pair: groups[pair] for pair in sorted(assigned)}
@@ -686,7 +698,13 @@ def _preserve_to_output(
                 for pair in pairs:
                     for source in sorted(groups[pair].get(label, [])):
                         verify_output()
-                        _copy_preserved_chunk(root, label, source.name, destination)
+                        _copy_preserved_chunk(
+                            root,
+                            label,
+                            source.name,
+                            destination,
+                            bound_input._expected_identity(label, source.name),
+                        )
                         count += 1
                 counts[name][label] = count
 
