@@ -1447,3 +1447,53 @@ def test_bound_file_opener_refuses_unsafe_components_before_traversal(
             splitter._open_source_file(root, (component, "chunk_manifest.jsonl"), handles)
     finally:
         os.close(root)
+
+
+def test_valid_prior_with_extra_split_is_rejected_by_exact_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A fourth split is forbidden even when all membership structures are valid."""
+    source = corpus(tmp_path / "input")
+    document = prior_document()
+    document["splits"]["extra"] = {"pair_ids": []}
+    prior = write_prior(tmp_path, document)
+    before = hashes(source)
+    output = tmp_path / "out"
+    with pytest.raises(SystemExit) as error:
+        invoke(monkeypatch, source, output, prior)
+    assert error.value.code == 1
+    assert "Prior splits must contain exactly train/validation/test" in capsys.readouterr().err
+    assert not output.exists()
+    assert hashes(source) == before
+
+
+def test_prior_membership_overrides_misleading_pair_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Names suggesting train/test cannot override the prior's inverse membership."""
+    source = corpus(tmp_path / "input")
+    before = hashes(source)
+    document = prior_document()
+    document["splits"]["train"]["pair_ids"] = ["legacy-test"]
+    document["splits"]["test"]["pair_ids"] = ["legacy-train"]
+    prior = write_prior(tmp_path, document)
+    output = tmp_path / "out"
+    invoke(monkeypatch, source, output, prior)
+    integrity = json.loads((output / "split_integrity.json").read_bytes())
+    report = json.loads((output / "split_assignment_report.json").read_bytes())
+    for name, pair in (
+        ("train", "legacy-test"),
+        ("validation", "legacy-val"),
+        ("test", "legacy-train"),
+    ):
+        assert integrity["splits"][name]["pair_ids"] == [pair]
+        assert report["splits"][name]["pair_ids"] == [pair]
+        paths = list((output / ("val" if name == "validation" else name)).rglob("*.wav"))
+        assert len(paths) == 2
+        assert all(path.read_bytes().decode().startswith(pair + "-mic") for path in paths)
+    assert report["unassigned_pair_ids"] == ["new-pair"]
+    assert not any("new-pair" in path.name for path in output.rglob("*.wav"))
+    assert hashes(source) == before
