@@ -377,7 +377,8 @@ python -m coffee_first_crack.data_prep.dataset_splitter \
 ```
 
 The prior report must declare schema version 1, `pair_id` strategy, passed
-integrity, and disjoint train/validation/test pair IDs. The preservation input
+integrity, disjoint train/validation/test pair IDs, and no duplicate JSON object
+keys. The preservation input
 is limited to 16 MiB, with a bounded read that also rejects growth beyond the
 limit. Its exact loaded bytes
 are bound by SHA-256. Current usable chunks retain their original pair's split;
@@ -396,9 +397,15 @@ holdout or qualify any model.
 The output must not exist in any form, including an empty directory or dangling
 symlink, and its parent must already exist. Output inside the input tree is
 refused. All input validation precedes exclusive directory creation; copied
-chunks and reports are also created exclusively. Source chunks are opened through
-a descriptor anchored to the selected input root, with no-follow directory and
-file opens, nonblocking reads and regular-file verification. No previous output is erased or
+chunks and reports are also created exclusively. Manifest validation, chunk
+discovery and copying share one held input root, with no-follow directory/file
+opens, nonblocking reads and regular-file verification. Output ancestry is
+checked by filesystem identity, including case and filesystem aliases. Output
+parents, split directories, copied files and reports use held directory
+descriptors so path swaps cannot redirect writes into the input tree. Directory
+bindings are checked throughout publication; the assignment sidecar precedes the
+final integrity marker. These boundaries bind file resolution; they do not
+snapshot concurrent in-place edits to regular files. No previous output is erased or
 overwritten. An I/O failure can leave incomplete fresh output; nothing is erased
 to retry, and incomplete chunk copying never publishes an integrity success.
 Reviewed provenance dispatch (#71) remains pending.

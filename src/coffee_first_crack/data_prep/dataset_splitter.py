@@ -23,15 +23,17 @@ import re
 import shutil
 import stat
 from collections import defaultdict
+from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TextIO, cast
 
 from sklearn.model_selection import train_test_split
 
 from coffee_first_crack.data_prep.output_paths import require_absent_output_dir
 
 logger = logging.getLogger(__name__)
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
 _MAX_PRIOR_BYTES = 16 * 1024 * 1024
 _CHUNK_LABELS = frozenset({"first_crack", "no_first_crack"})
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -85,12 +87,15 @@ def group_chunks_by_recording(
 def group_chunks_by_pair(
     input_dir: Path,
     chunk_manifest_path: Path,
+    *,
+    _bound_input: _BoundChunkInput | None = None,
 ) -> tuple[dict[str, dict[str, list[Path]]], dict[str, set[str]]]:
     """Group included chunks by physical pair identity.
 
     Args:
         input_dir: Root containing label directories and chunk WAVs.
         chunk_manifest_path: JSONL manifest emitted by ``chunk_audio``.
+        _bound_input: Descriptor-backed IO for preservation; identity rules are shared.
 
     Returns:
         ``(groups, recordings_by_pair)`` where groups have the same label-file
@@ -101,7 +106,7 @@ def group_chunks_by_pair(
         ValueError: If identities are missing, duplicated, or disagree with the
             filesystem.
     """
-    if not chunk_manifest_path.is_file():
+    if _bound_input is None and not chunk_manifest_path.is_file():
         raise FileNotFoundError(
             f"Pair-aware chunk manifest is required for leakage-free splitting: "
             f"{chunk_manifest_path}"
@@ -110,7 +115,12 @@ def group_chunks_by_pair(
     recordings_by_pair: dict[str, set[str]] = defaultdict(set)
     pair_by_source_hash: dict[str, str] = {}
     declared_filenames: set[str] = set()
-    with chunk_manifest_path.open("r", encoding="utf-8") as handle:
+    reader = (
+        chunk_manifest_path.open("r", encoding="utf-8")
+        if _bound_input is None
+        else _bound_input._open_manifest()
+    )
+    with reader as handle:
         for line_number, line in enumerate(handle, start=1):
             if not line.strip():
                 continue
@@ -159,21 +169,30 @@ def group_chunks_by_pair(
                 raise ValueError(f"Duplicate included chunk in manifest: {filename}")
             declared_filenames.add(filename)
             label_dir = input_dir / label
-            if not label_dir.is_dir() or label_dir.is_symlink():
-                raise ValueError(f"Chunk label directory must be a regular directory: {label_dir}")
             chunk_path = label_dir / filename
-            if not chunk_path.is_file() or chunk_path.is_symlink():
-                raise FileNotFoundError(
-                    f"Declared chunk must be a regular non-symlink file: {chunk_path}"
-                )
+            if _bound_input is not None:
+                _bound_input._validate_chunk(label, filename)
+            else:
+                if not label_dir.is_dir() or label_dir.is_symlink():
+                    raise ValueError(
+                        f"Chunk label directory must be a regular directory: {label_dir}"
+                    )
+                if not chunk_path.is_file() or chunk_path.is_symlink():
+                    raise FileNotFoundError(
+                        f"Declared chunk must be a regular non-symlink file: {chunk_path}"
+                    )
             groups[pair_id][label].append(chunk_path)
 
-    actual_filenames = {
-        path.name
-        for label_dir in input_dir.iterdir()
-        if label_dir.is_dir() and not label_dir.name.startswith(".")
-        for path in label_dir.glob("*.wav")
-    }
+    actual_filenames = (
+        _bound_input._filenames()
+        if _bound_input is not None
+        else {
+            path.name
+            for label_dir in input_dir.iterdir()
+            if label_dir.is_dir() and not label_dir.name.startswith(".")
+            for path in label_dir.glob("*.wav")
+        }
+    )
     if declared_filenames != actual_filenames:
         missing = sorted(actual_filenames - declared_filenames)
         extra = sorted(declared_filenames - actual_filenames)
@@ -304,6 +323,7 @@ def generate_split_report(
     recordings_by_pair: dict[str, set[str]] | None = None,
     *,
     exclusive: bool = False,
+    _write_report: Callable[[str, str], None] | None = None,
 ) -> None:
     """Generate a markdown split report.
 
@@ -318,6 +338,7 @@ def generate_split_report(
         test_counts: Test label counts.
         recordings_by_pair: Physical pair-to-stream identities.
         exclusive: Refuse to overwrite reports in preservation mode.
+        _write_report: Bound output writer used only by preservation orchestration.
     """
     total_train = sum(train_counts.values())
     total_val = sum(val_counts.values())
@@ -372,8 +393,11 @@ def generate_split_report(
         lines.append(f"| {name} | {fc} | {nfc} | {total} | {pct:.1f}% |")
 
     report_path = output_dir / "split_report.md"
-    with report_path.open("x" if exclusive else "w", encoding="utf-8") as handle:
-        handle.write("\n".join(lines) + "\n")
+    if _write_report is None:
+        with report_path.open("x" if exclusive else "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+    else:
+        _write_report(report_path.name, "\n".join(lines) + "\n")
     print(f"\n📊 Split report saved to: {report_path}")
 
     train_pairs = set(train_recs)
@@ -414,8 +438,11 @@ def generate_split_report(
         "integrity_passed": True,
     }
     integrity_path = output_dir / "split_integrity.json"
-    with integrity_path.open("x" if exclusive else "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(integrity, indent=2, sort_keys=True) + "\n")
+    if _write_report is None:
+        with integrity_path.open("x" if exclusive else "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(integrity, indent=2, sort_keys=True) + "\n")
+    else:
+        _write_report(integrity_path.name, json.dumps(integrity, indent=2, sort_keys=True) + "\n")
     print(f"🔒 Pair integrity report saved to: {integrity_path}")
 
 
@@ -478,6 +505,15 @@ def preserve_pair_assignments(
     )
 
 
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate prior JSON object key: {key!r}")
+        result[key] = value
+    return result
+
+
 def _load_prior(path: Path) -> tuple[dict[str, list[str]], str]:
     # O_NONBLOCK prevents a raced FIFO from hanging before fstat can reject it.
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -490,31 +526,97 @@ def _load_prior(path: Path) -> tuple[dict[str, list[str]], str]:
         payload = handle.read(_MAX_PRIOR_BYTES + 1)
         if len(payload) > _MAX_PRIOR_BYTES:
             raise ValueError("Prior integrity exceeds 16 MiB maximum")
-    return validate_prior_assignments(json.loads(payload)), hashlib.sha256(payload).hexdigest()
+    return validate_prior_assignments(
+        json.loads(payload, object_pairs_hook=_unique_json_object)
+    ), hashlib.sha256(payload).hexdigest()
+
+
+def _open_source_file(root: int, parts: tuple[str, ...], handles: ExitStack) -> int:
+    directory = root
+    for component in parts[:-1]:
+        directory = os.open(component, _DIRECTORY_FLAGS, dir_fd=directory)
+        handles.callback(os.close, directory)
+    descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+    handles.callback(os.close, descriptor)
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        raise ValueError("Preserved input must be a regular non-symlink file")
+    return descriptor
+
+
+class _BoundChunkInput:
+    """Filesystem adapter sharing one held root with grouping and copying."""
+
+    def __init__(self, root: int, manifest: int) -> None:
+        self._root = root
+        self._manifest = manifest
+
+    def _open_manifest(self) -> TextIO:
+        return os.fdopen(os.dup(self._manifest), "r", encoding="utf-8")
+
+    def _validate_chunk(self, label: str, filename: str) -> None:
+        with ExitStack() as handles:
+            _open_source_file(self._root, (label, filename), handles)
+
+    def _filenames(self) -> set[str]:
+        filenames: set[str] = set()
+        with os.scandir(self._root) as labels:
+            for label in labels:
+                if label.name.startswith("."):
+                    continue
+                if label.is_symlink():
+                    raise ValueError("Input label entries must not be symlinks")
+                if not label.is_dir(follow_symlinks=False):
+                    continue
+                with ExitStack() as handles:
+                    directory = os.open(label.name, _DIRECTORY_FLAGS, dir_fd=self._root)
+                    handles.callback(os.close, directory)
+                    filenames.update(
+                        name for name in os.listdir(directory) if name.endswith(".wav")
+                    )
+        return filenames
+
+
+def _identity(descriptor: int) -> tuple[int, int]:
+    metadata = os.fstat(descriptor)
+    return metadata.st_dev, metadata.st_ino
+
+
+def _require_outside_input(directory: int, input_root: int) -> None:
+    # Walk actual directory identities, including case/firmlink aliases.
+    current = os.dup(directory)
+    try:
+        while True:
+            if _identity(current) == _identity(input_root):
+                raise ValueError("Output must not be inside the input chunk tree")
+            ancestor = os.open("..", _DIRECTORY_FLAGS, dir_fd=current)
+            if _identity(ancestor) == _identity(current):
+                os.close(ancestor)
+                return
+            os.close(current)
+            current = ancestor
+    finally:
+        os.close(current)
+
+
+def _exclusive_output_file(directory: int, filename: str, handles: ExitStack) -> int:
+    descriptor = os.open(
+        filename,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK,
+        0o666,
+        dir_fd=directory,
+    )
+    handles.callback(os.close, descriptor)
+    return descriptor
 
 
 def _copy_preserved_chunk(
-    root_descriptor: int, label: str, filename: str, destination: Path
+    root_descriptor: int, label: str, filename: str, destination_descriptor: int
 ) -> None:
-    # Anchor every input component to the selected root; no path reopen can
-    # follow a replaced label directory or chunk link outside that root.
     with ExitStack() as handles:
-        label_descriptor = os.open(
-            label,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK,
-            dir_fd=root_descriptor,
-        )
-        handles.callback(os.close, label_descriptor)
-        source_descriptor = os.open(
-            filename,
-            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-            dir_fd=label_descriptor,
-        )
-        handles.callback(os.close, source_descriptor)
-        if not stat.S_ISREG(os.fstat(source_descriptor).st_mode):
-            raise ValueError("Preserved source chunk must be a regular non-symlink file")
-        reader = handles.enter_context(os.fdopen(source_descriptor, "rb", closefd=False))
-        writer = handles.enter_context(destination.open("xb"))
+        source = _open_source_file(root_descriptor, (label, filename), handles)
+        destination = _exclusive_output_file(destination_descriptor, filename, handles)
+        reader = handles.enter_context(os.fdopen(source, "rb", closefd=False))
+        writer = handles.enter_context(os.fdopen(destination, "wb", closefd=False))
         shutil.copyfileobj(reader, writer)
 
 
@@ -522,71 +624,120 @@ def _preserve_to_output(
     input_dir: Path, output_dir: Path, manifest: Path, prior_path: Path
 ) -> None:
     require_absent_output_dir(output_dir)
-    if output_dir.resolve().is_relative_to(input_dir.resolve()):
-        raise ValueError("Output must not be inside the input chunk tree")
     prior, prior_hash = _load_prior(prior_path)
-    with ExitStack() as sources:
-        root_descriptor = os.open(
-            input_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
+    # Resolve only manifest placement before binding the input. No later path
+    # grouping may observe a different root than the descriptor used to copy.
+    try:
+        relative_manifest = manifest.absolute().relative_to(input_dir.absolute()).parts
+    except ValueError:
+        relative_manifest = (manifest.name,) if manifest.parent.samefile(input_dir) else None
+    with ExitStack() as handles:
+        root = os.open(input_dir, _DIRECTORY_FLAGS)
+        handles.callback(os.close, root)
+        parent = os.open(output_dir.parent, _DIRECTORY_FLAGS)
+        handles.callback(os.close, parent)
+        _require_outside_input(parent, root)
+        if relative_manifest is None:
+            manifest_descriptor = os.open(manifest, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            handles.callback(os.close, manifest_descriptor)
+            if not stat.S_ISREG(os.fstat(manifest_descriptor).st_mode):
+                raise ValueError("Chunk manifest must be a regular file")
+        else:
+            manifest_descriptor = _open_source_file(root, relative_manifest, handles)
+        groups, streams = group_chunks_by_pair(
+            input_dir, manifest, _bound_input=_BoundChunkInput(root, manifest_descriptor)
         )
-        sources.callback(os.close, root_descriptor)
-        groups, streams = group_chunks_by_pair(input_dir, manifest)
         assignments, unassigned, missing = preserve_pair_assignments(prior, set(groups))
         assigned = {pair for pairs in assignments.values() for pair in pairs}
         assigned_groups = {pair: groups[pair] for pair in sorted(assigned)}
         assigned_streams = {pair: streams[pair] for pair in sorted(assigned)}
-        output_dir.mkdir(parents=False, exist_ok=False)
+        bindings: list[tuple[int, str, int]] = []
+
+        def verify_output() -> None:
+            metadata = output_dir.parent.stat(follow_symlinks=False)
+            if (metadata.st_dev, metadata.st_ino) != _identity(parent):
+                raise ValueError("Output parent identity changed")
+            _require_outside_input(parent, root)
+            for container, name, descriptor in bindings:
+                entry = os.stat(name, dir_fd=container, follow_symlinks=False)
+                if not stat.S_ISDIR(entry.st_mode) or (entry.st_dev, entry.st_ino) != _identity(
+                    descriptor
+                ):
+                    raise ValueError("Output directory identity changed")
+                _require_outside_input(descriptor, root)
+
+        def create_directory(container: int, name: str) -> int:
+            verify_output()
+            os.mkdir(name, dir_fd=container)
+            descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=container)
+            handles.callback(os.close, descriptor)
+            bindings.append((container, name, descriptor))
+            verify_output()
+            return descriptor
+
+        output = create_directory(parent, output_dir.name)
         counts: dict[str, dict[str, int]] = {}
         for name, pairs in assignments.items():
-            split_dir = output_dir / ("val" if name == "validation" else name)
-            split_dir.mkdir()
+            split = create_directory(output, "val" if name == "validation" else name)
             counts[name] = {}
             for label in sorted(_CHUNK_LABELS):
-                label_dir = split_dir / label
-                label_dir.mkdir()
+                destination = create_directory(split, label)
                 count = 0
                 for pair in pairs:
                     for source in sorted(groups[pair].get(label, [])):
-                        _copy_preserved_chunk(
-                            root_descriptor, label, source.name, label_dir / source.name
-                        )
+                        verify_output()
+                        _copy_preserved_chunk(root, label, source.name, destination)
                         count += 1
                 counts[name][label] = count
-    # Reports are published only after every copy has completed successfully.
-    generate_split_report(
-        output_dir,
-        assigned_groups,
-        assignments["train"],
-        assignments["validation"],
-        assignments["test"],
-        counts["train"],
-        counts["validation"],
-        counts["test"],
-        assigned_streams,
-        exclusive=True,
-    )
-    report = {
-        "schema_version": 1,
-        "assignment_mode": "preserved",
-        "prior_split_integrity_sha256": prior_hash,
-        "seed_and_ratios_used": False,
-        "fresh_holdout": False,
-        "unassigned_pair_ids": unassigned,
-        "unassigned_source_stream_ids": {pair: sorted(streams[pair]) for pair in unassigned},
-        "missing_prior_pair_ids": missing,
-        "splits": {
-            name: {
-                "pair_ids": pairs,
-                "physical_session_count": len(pairs),
-                "stream_recording_count": sum(len(streams[pair]) for pair in pairs),
-                "chunk_count": sum(counts[name].values()),
-                "label_counts": counts[name],
-            }
-            for name, pairs in assignments.items()
-        },
-    }
-    with (output_dir / "split_assignment_report.json").open("x", encoding="utf-8") as handle:
-        handle.write(json.dumps(report, indent=2, sort_keys=True) + "\n")
+
+        def write_report(filename: str, content: str) -> None:
+            verify_output()
+            with ExitStack() as files:
+                descriptor = _exclusive_output_file(output, filename, files)
+                verify_output()
+                writer = files.enter_context(
+                    os.fdopen(descriptor, "w", encoding="utf-8", closefd=False)
+                )
+                writer.write(content)
+            verify_output()
+
+        report = {
+            "schema_version": 1,
+            "assignment_mode": "preserved",
+            "prior_split_integrity_sha256": prior_hash,
+            "seed_and_ratios_used": False,
+            "fresh_holdout": False,
+            "unassigned_pair_ids": unassigned,
+            "unassigned_source_stream_ids": {pair: sorted(streams[pair]) for pair in unassigned},
+            "missing_prior_pair_ids": missing,
+            "splits": {
+                name: {
+                    "pair_ids": pairs,
+                    "physical_session_count": len(pairs),
+                    "stream_recording_count": sum(len(streams[pair]) for pair in pairs),
+                    "chunk_count": sum(counts[name].values()),
+                    "label_counts": counts[name],
+                }
+                for name, pairs in assignments.items()
+            },
+        }
+        # Integrity is the final marker: sidecar/report failures cannot leave it true.
+        write_report(
+            "split_assignment_report.json", json.dumps(report, indent=2, sort_keys=True) + "\n"
+        )
+        generate_split_report(
+            output_dir,
+            assigned_groups,
+            assignments["train"],
+            assignments["validation"],
+            assignments["test"],
+            counts["train"],
+            counts["validation"],
+            counts["test"],
+            assigned_streams,
+            exclusive=True,
+            _write_report=write_report,
+        )
 
 
 def main() -> None:

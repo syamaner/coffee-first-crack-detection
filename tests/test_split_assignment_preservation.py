@@ -147,10 +147,41 @@ def test_membership_counts_and_determinism(
             assert all(path.read_bytes().decode().startswith(pair + "-mic") for path in copied)
             assert integrity["splits"][name]["pair_ids"] == [pair]
             assert report["splits"][name]["chunk_count"] == len(copied)
+            expected_labels = {"first_crack": 2 if changed else 1, "no_first_crack": 1}
+            expected_streams = [f"{pair}-mic{mic}" for mic in range(1, 4 if changed else 3)]
+            if name == "train":
+                expected_streams.append("excluded-stream")
+            expected_streams.sort()
+            assert integrity["splits"][name] == {
+                "pair_ids": [pair],
+                "physical_session_count": 1,
+                "stream_recording_count": len(expected_streams),
+            }
+            assert report["splits"][name] == {
+                "pair_ids": [pair],
+                "physical_session_count": 1,
+                "stream_recording_count": len(expected_streams),
+                "chunk_count": len(copied),
+                "label_counts": expected_labels,
+            }
+            for label, count in expected_labels.items():
+                assert len(list((split_dir / label).glob("*.wav"))) == count
+            markdown = (output / "split_report.md").read_text()
+            display_name = {"train": "Train", "validation": "Val", "test": "Test"}[name]
+            assert (
+                f"| {display_name} | {expected_labels['first_crack']} | 1 | {len(copied)} | 33.3% |"
+                in markdown
+            )
+            assert (
+                f"- {pair}: {len(expected_streams)} stream(s) [{', '.join(expected_streams)}]; "
+                f"{expected_labels['first_crack']} first_crack, 1 no_first_crack"
+            ) in markdown
         markdown = (output / "split_report.md").read_text()
         assert f"**Total chunks**: {9 if changed else 6}" in markdown
         assert "new-pair" not in markdown
         assert "excluded-stream" in markdown
+        assert not any("new-pair" in str(path.relative_to(output)) for path in output.rglob("*"))
+        assert all(not path.read_bytes().startswith(b"new-pair") for path in output.rglob("*.wav"))
     assert hashes(outputs[0]) == hashes(outputs[1])
     assert hashes(source) == before
 
@@ -169,7 +200,47 @@ def test_all_unassigned_and_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         assert integrity["physical_session_count"] == integrity["stream_recording_count"] == 0
         assert not list(output.rglob("*.wav"))
         assert all(split["chunk_count"] == 0 for split in report["splits"].values())
-        assert "**Total chunks**: 0" in (output / "split_report.md").read_text()
+        markdown = (output / "split_report.md").read_text()
+        assert "**Total chunks**: 0" in markdown
+        assert "**Total streams / recordings**: 0" in markdown
+        assert report["missing_prior_pair_ids"] == [
+            "missing-legacy-test",
+            "missing-legacy-train",
+            "missing-legacy-val",
+        ]
+        assert report["unassigned_pair_ids"] == (
+            ["legacy-test", "legacy-train", "legacy-val", "new-pair"] if index == 0 else []
+        )
+        assert report["unassigned_source_stream_ids"] == (
+            {
+                pair: sorted(
+                    [f"{pair}-mic1", f"{pair}-mic2"]
+                    + (["excluded-stream"] if pair == "legacy-train" else [])
+                )
+                for pair in ["legacy-test", "legacy-train", "legacy-val", "new-pair"]
+            }
+            if index == 0
+            else {}
+        )
+        for name in ("train", "validation", "test"):
+            assert integrity["splits"][name] == {
+                "pair_ids": [],
+                "physical_session_count": 0,
+                "stream_recording_count": 0,
+            }
+            assert report["splits"][name] == {
+                "pair_ids": [],
+                "physical_session_count": 0,
+                "stream_recording_count": 0,
+                "chunk_count": 0,
+                "label_counts": {"first_crack": 0, "no_first_crack": 0},
+            }
+        for name in ("Train", "Val", "Test"):
+            assert f"| {name} | 0 | 0 | 0 | 0.0% |" in markdown
+        assert not any(
+            line.startswith("- legacy-") or line.startswith("- missing-")
+            for line in markdown.splitlines()
+        )
         if index == 0:
             for path in source.rglob("*.wav"):
                 path.unlink()
@@ -296,15 +367,18 @@ def test_creation_race_not_adopted(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     source = corpus(tmp_path / "input")
     prior = write_prior(tmp_path)
     output = tmp_path / "output"
-    original = Path.mkdir
+    original = os.mkdir
+    raced = False
 
-    def race(path: Path, *args: object, **kwargs: object) -> None:
-        if path == output:
-            original(path)
-            (path / "sentinel").write_bytes(b"raced")
-        original(path, *args, **kwargs)
+    def race(path: str | Path, mode: int = 0o777, *, dir_fd: int | None = None) -> None:
+        nonlocal raced
+        if path == output.name and dir_fd is not None and not raced:
+            raced = True
+            original(path, mode, dir_fd=dir_fd)
+            (output / "sentinel").write_bytes(b"raced")
+        original(path, mode, dir_fd=dir_fd)
 
-    monkeypatch.setattr(Path, "mkdir", race)
+    monkeypatch.setattr(os, "mkdir", race)
     with pytest.raises(SystemExit):
         invoke(monkeypatch, source, output, prior)
     assert sorted(path.name for path in output.iterdir()) == ["sentinel"]
@@ -323,25 +397,36 @@ def test_preplanted_destination_not_overwritten(
     source = corpus(tmp_path / "input")
     prior = write_prior(tmp_path)
     output = tmp_path / "output"
-    original = Path.open
-    planted: list[Path] = []
+    original = os.open
+    planted: list[str] = []
 
-    def plant(path: Path, mode: str = "r", *args: object, **kwargs: object) -> object:
+    def plant(
+        path: str | Path,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        name = str(path)
         if (
-            path.is_relative_to(output)
+            flags & os.O_CREAT
             and not planted
-            and (path.suffix == ".wav" if destination == "wav" else path.name == destination)
+            and (name.endswith(".wav") if destination == "wav" else name == destination)
         ):
-            with original(path, "wb") as handle:
-                handle.write(b"sentinel")
-            planted.append(path)
-        return original(path, mode, *args, **kwargs)
+            descriptor = original(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode, dir_fd=dir_fd)
+            try:
+                os.write(descriptor, b"sentinel")
+            finally:
+                os.close(descriptor)
+            planted.append(name)
+        return original(path, flags, mode, dir_fd=dir_fd)
 
-    monkeypatch.setattr(Path, "open", plant)
+    monkeypatch.setattr(os, "open", plant)
     with pytest.raises(SystemExit):
         invoke(monkeypatch, source, output, prior)
-    assert planted[0].read_bytes() == b"sentinel"
-    if destination == "wav":
+    matches = list(output.rglob(planted[0]))
+    assert len(matches) == 1 and matches[0].read_bytes() == b"sentinel"
+    if destination in {"wav", "split_assignment_report.json"}:
         assert not (output / "split_integrity.json").exists()
 
 
@@ -358,7 +443,8 @@ def test_copy_failure_has_no_success_report(
     monkeypatch.setattr(splitter.shutil, "copyfileobj", fail)
     with pytest.raises(SystemExit):
         invoke(monkeypatch, source, tmp_path / "out", prior)
-    assert not (tmp_path / "out" / "split_integrity.json").exists()
+    for name in ("split_report.md", "split_integrity.json", "split_assignment_report.json"):
+        assert not (tmp_path / "out" / name).exists()
     assert hashes(source) == before
 
 
@@ -606,7 +692,7 @@ def test_prior_read_bound_and_growth(
     grow: bool,
 ) -> None:
     """Inspect actual read size; growth remains valid JSON and must hit size guard."""
-    from typing import BinaryIO
+    from typing import BinaryIO, TextIO
 
     source = corpus(tmp_path / "input")
     prior = write_prior(tmp_path)
@@ -640,9 +726,15 @@ def test_prior_read_bound_and_growth(
             returned_sizes.append(len(result))
             return result
 
-    def observe(descriptor: int, mode: str, *, closefd: bool = True) -> ReadProbe | BinaryIO:
+    def observe(
+        descriptor: int,
+        mode: str,
+        *,
+        closefd: bool = True,
+        encoding: str | None = None,
+    ) -> ReadProbe | BinaryIO | TextIO:
         metadata = original_fstat(descriptor)
-        handle = original_fdopen(descriptor, mode, closefd=closefd)
+        handle = original_fdopen(descriptor, mode, closefd=closefd, encoding=encoding)
         if (metadata.st_dev, metadata.st_ino) == (prior_identity.st_dev, prior_identity.st_ino):
             return ReadProbe(handle)
         return handle
@@ -705,8 +797,10 @@ def test_source_swap_fails_before_outside_copy(
     def validate_then_swap(
         input_dir: Path,
         manifest: Path,
+        *,
+        _bound_input: splitter._BoundChunkInput | None = None,
     ) -> tuple[dict[str, dict[str, list[Path]]], dict[str, set[str]]]:
-        result = original_group(input_dir, manifest)
+        result = original_group(input_dir, manifest, _bound_input=_bound_input)
         label = source / "first_crack"
         victim = label / "legacy-train-mic1_w0000.0.wav"
         if swap == "label-link":
@@ -735,3 +829,348 @@ def test_source_swap_fails_before_outside_copy(
     for descriptor in descriptors:
         with pytest.raises(OSError):
             os.fstat(descriptor)
+
+
+def tracked_descriptors(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Observe descriptor acquisition without replacing filesystem behaviour."""
+    opened: list[int] = []
+    original_open, original_dup = os.open, os.dup
+
+    def track(path: str | Path, flags: int, *args: object, **kwargs: object) -> int:
+        descriptor = original_open(path, flags, *args, **kwargs)
+        opened.append(descriptor)
+        return descriptor
+
+    def duplicate(descriptor: int) -> int:
+        result = original_dup(descriptor)
+        opened.append(result)
+        return result
+
+    monkeypatch.setattr(os, "open", track)
+    monkeypatch.setattr(os, "dup", duplicate)
+    return opened
+
+
+def assert_descriptors_closed(opened: list[int]) -> None:
+    """Prove every observed descriptor has been closed after orchestration."""
+    assert opened
+    for descriptor in opened:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+def test_input_root_swap_keeps_manifest_validation_and_copy_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = corpus(tmp_path / "input")
+    prior = write_prior(tmp_path)
+    original_root = tmp_path / "original-root"
+    original = os.open
+    swapped = False
+    before = hashes(source)
+
+    def swap_after_open(path: str | Path, flags: int, *args: object, **kwargs: object) -> int:
+        nonlocal swapped
+        descriptor = original(path, flags, *args, **kwargs)
+        if path == source and flags & os.O_DIRECTORY and not swapped:
+            swapped = True
+            source.rename(original_root)
+            corpus(source)
+            manifest = source / "chunk_manifest.jsonl"
+            manifest.write_text(manifest.read_text().replace("legacy-", "replacement-"))
+            for chunk in source.rglob("*.wav"):
+                chunk.write_bytes(b"REPLACEMENT ROOT MARKER")
+        return descriptor
+
+    monkeypatch.setattr(os, "open", swap_after_open)
+    opened = tracked_descriptors(monkeypatch)
+    output = tmp_path / "out"
+    invoke(monkeypatch, source, output, prior)
+    assert swapped
+    assert hashes(original_root) == before
+    integrity = json.loads((output / "split_integrity.json").read_text())
+    for name, pair in (
+        ("train", "legacy-train"),
+        ("validation", "legacy-val"),
+        ("test", "legacy-test"),
+    ):
+        assert integrity["splits"][name]["pair_ids"] == [pair]
+    assert all(b"REPLACEMENT ROOT" not in path.read_bytes() for path in output.rglob("*.wav"))
+    assert len(list(output.rglob("*.wav"))) == 6
+    assert_descriptors_closed(opened)
+
+
+@pytest.mark.parametrize(
+    "when", ["preflight", "grouping", "copy", "subdirectory", "report", "integrity"]
+)
+def test_output_binding_swaps_never_write_into_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    when: str,
+) -> None:
+    source = corpus(tmp_path / "input")
+    before = hashes(source)
+    prior = write_prior(tmp_path)
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    output = parent / "out"
+    saved_parent = tmp_path / "saved-parent"
+    saved_output = tmp_path / "saved-output"
+    swapped = False
+
+    def replace_parent() -> None:
+        nonlocal swapped
+        if not swapped:
+            parent.rename(saved_parent)
+            parent.symlink_to(source, target_is_directory=True)
+            swapped = True
+
+    original_preflight = splitter.require_absent_output_dir
+    original_group = splitter.group_chunks_by_pair
+    original_copy = splitter.shutil.copyfileobj
+    original_file = splitter._exclusive_output_file
+
+    def preflight(path: Path) -> None:
+        original_preflight(path)
+        if when == "preflight":
+            replace_parent()
+
+    def grouping(
+        input_dir: Path,
+        manifest: Path,
+        *,
+        _bound_input: splitter._BoundChunkInput | None = None,
+    ) -> tuple[dict[str, dict[str, list[Path]]], dict[str, set[str]]]:
+        result = original_group(input_dir, manifest, _bound_input=_bound_input)
+        if when == "grouping":
+            replace_parent()
+        return result
+
+    def copy(reader: object, writer: object) -> None:
+        nonlocal swapped
+        if not swapped and when == "copy":
+            replace_parent()
+        elif not swapped and when == "subdirectory":
+            directory = output / "train" / "first_crack"
+            directory.rename(output / "train" / "original-label")
+            directory.symlink_to(source / "first_crack", target_is_directory=True)
+            swapped = True
+        original_copy(reader, writer)
+
+    def report_file(directory: int, name: str, handles: object) -> int:
+        nonlocal swapped
+        if (
+            (when == "report" and name == "split_assignment_report.json")
+            or (when == "integrity" and name == "split_integrity.json")
+        ) and not swapped:
+            output.rename(saved_output)
+            output.symlink_to(source, target_is_directory=True)
+            swapped = True
+        return original_file(directory, name, handles)
+
+    monkeypatch.setattr(splitter, "require_absent_output_dir", preflight)
+    monkeypatch.setattr(splitter, "group_chunks_by_pair", grouping)
+    monkeypatch.setattr(splitter.shutil, "copyfileobj", copy)
+    monkeypatch.setattr(splitter, "_exclusive_output_file", report_file)
+    opened = tracked_descriptors(monkeypatch)
+    with pytest.raises(SystemExit) as error:
+        invoke(monkeypatch, source, output, prior)
+    assert error.value.code == 1 and swapped
+    assert hashes(source) == before
+    assert not (source / "out").exists()
+    for candidate in (output, saved_output, saved_parent / "out"):
+        marker = candidate / "split_integrity.json"
+        assert not marker.exists() or marker.read_bytes() == b""
+    assert_descriptors_closed(opened)
+
+
+@pytest.mark.parametrize("alias_kind", ["case", "private-prefix", "firmlink"])
+def test_output_alias_inside_input_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    alias_kind: str,
+) -> None:
+    source = corpus(tmp_path / "CaseInput")
+    prior = write_prior(tmp_path)
+    if alias_kind == "case":
+        alias = source.with_name("caseinput")
+    elif alias_kind == "private-prefix":
+        alias = Path(str(source).removeprefix("/private"))
+    else:
+        alias = Path("/System/Volumes/Data") / source.relative_to("/")
+    if alias == source or not alias.exists() or not alias.samefile(source):
+        pytest.skip(f"This filesystem does not provide the {alias_kind} alias")
+    before = hashes(source)
+    opened = tracked_descriptors(monkeypatch)
+    with pytest.raises(SystemExit):
+        invoke(monkeypatch, source, alias / "nested", prior)
+    assert not (source / "nested").exists()
+    assert hashes(source) == before
+    assert_descriptors_closed(opened)
+
+
+def test_parent_disappearance_at_exclusive_creation_is_not_recreated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = corpus(tmp_path / "input")
+    prior = write_prior(tmp_path)
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    original = os.mkdir
+    removed = False
+
+    def disappear(path: str | Path, mode: int = 0o777, *, dir_fd: int | None = None) -> None:
+        nonlocal removed
+        if path == "out" and dir_fd is not None and not removed:
+            parent.rmdir()
+            removed = True
+        original(path, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "mkdir", disappear)
+    opened = tracked_descriptors(monkeypatch)
+    with pytest.raises(SystemExit):
+        invoke(monkeypatch, source, parent / "out", prior)
+    assert removed and not parent.exists()
+    assert_descriptors_closed(opened)
+
+
+@pytest.mark.parametrize("level", ["root", "split", "pair_ids"])
+def test_duplicate_prior_object_keys_fail_before_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    level: str,
+) -> None:
+    source = corpus(tmp_path / "input")
+    document = prior_document()
+    raw = json.dumps(document, separators=(",", ":"))
+    if level == "root":
+        old, new = '"schema_version":1', '"schema_version":1,"schema_version":1'
+    elif level == "split":
+        value = json.dumps(document["splits"]["train"], separators=(",", ":"))
+        old, new = f'"train":{value}', f'"train":{value},"train":{value}'
+    else:
+        old, new = (
+            '"pair_ids":["legacy-train"]',
+            '"pair_ids":["legacy-train"],"pair_ids":["legacy-train"]',
+        )
+    assert old in raw
+    prior = tmp_path / "prior.json"
+    prior.write_text(raw.replace(old, new, 1))
+    before = hashes(source)
+    with pytest.raises(SystemExit):
+        invoke(monkeypatch, source, tmp_path / "out", prior)
+    assert "Duplicate prior JSON object key" in capsys.readouterr().err
+    assert not (tmp_path / "out").exists()
+    assert hashes(source) == before
+
+
+def test_assignment_sidecar_failure_never_publishes_integrity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = corpus(tmp_path / "input")
+    prior = write_prior(tmp_path)
+    original = splitter._exclusive_output_file
+
+    def fail_sidecar(directory: int, name: str, handles: object) -> int:
+        if name == "split_assignment_report.json":
+            raise OSError("synthetic sidecar write failure")
+        return original(directory, name, handles)
+
+    monkeypatch.setattr(splitter, "_exclusive_output_file", fail_sidecar)
+    opened = tracked_descriptors(monkeypatch)
+    with pytest.raises(SystemExit):
+        invoke(monkeypatch, source, tmp_path / "out", prior)
+    assert not (tmp_path / "out" / "split_integrity.json").exists()
+    assert_descriptors_closed(opened)
+
+
+def test_second_default_fixture_report_bytes_match_bound_base(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin independently captured base749c bytes for reordered three-mic input."""
+    source = corpus(tmp_path / "input", changed=True, reverse=True)
+    output = tmp_path / "out"
+    invoke(
+        monkeypatch,
+        source,
+        output,
+        None,
+        "--train",
+        "0.5",
+        "--val",
+        "0.25",
+        "--test",
+        "0.25",
+        "--seed",
+        "123",
+    )
+    assert hashlib.sha256((output / "split_report.md").read_bytes()).hexdigest() == (
+        "42b2f80c097606a3a50124d6831a2cdb541eb9e5d02ea0982d5ec96622d44598"
+    )
+    assert hashlib.sha256((output / "split_integrity.json").read_bytes()).hexdigest() == (
+        "e91e848e175213b6224aaa172feae79fe9802a266c910f4612c79e258de66427"
+    )
+    assert not (output / "split_assignment_report.json").exists()
+
+
+@pytest.mark.parametrize("kind", ["external", "nested", "alias", "directory", "fifo"])
+def test_bound_manifest_locations_and_regular_file_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    source = corpus(tmp_path / "CaseInput")
+    prior = write_prior(tmp_path)
+    payload = (source / "chunk_manifest.jsonl").read_bytes()
+    hidden = source / ".metadata"
+    hidden.mkdir()
+    (hidden / "ignored.wav").write_bytes(b"hidden synthetic chunk")
+    if kind == "nested":
+        manifest = hidden / "chunks.jsonl"
+        manifest.write_bytes(payload)
+    elif kind == "alias":
+        alias = source.with_name("caseinput")
+        if not alias.exists() or not alias.samefile(source):
+            pytest.skip("This filesystem has no case alias")
+        manifest = alias / "chunk_manifest.jsonl"
+    else:
+        manifest = tmp_path / "external-manifest"
+        if kind == "directory":
+            manifest.mkdir()
+        elif kind == "fifo":
+            os.mkfifo(manifest)
+        else:
+            manifest.write_bytes(payload)
+    opened = tracked_descriptors(monkeypatch)
+    if kind in {"directory", "fifo"}:
+        with pytest.raises(SystemExit):
+            invoke(monkeypatch, source, tmp_path / "out", prior, "--chunk-manifest", str(manifest))
+        assert not (tmp_path / "out").exists()
+    else:
+        invoke(monkeypatch, source, tmp_path / "out", prior, "--chunk-manifest", str(manifest))
+        assert len(list((tmp_path / "out").rglob("*.wav"))) == 6
+        assert not any(
+            path.read_bytes().startswith(b"hidden") for path in (tmp_path / "out").rglob("*.wav")
+        )
+    assert_descriptors_closed(opened)
+
+
+def test_extra_input_link_is_rejected_without_following(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = corpus(tmp_path / "input")
+    prior = write_prior(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (source / "unrelated-link").symlink_to(outside, target_is_directory=True)
+    opened = tracked_descriptors(monkeypatch)
+    with pytest.raises(SystemExit):
+        invoke(monkeypatch, source, tmp_path / "out", prior)
+    assert not (tmp_path / "out").exists()
+    assert_descriptors_closed(opened)
