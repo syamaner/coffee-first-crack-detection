@@ -1396,3 +1396,54 @@ def test_preserved_non_ascii_reports_keep_explicit_utf8(
     assert b"caf\xc3\xa9" in markdown
     assert json.loads((output / "split_integrity.json").read_bytes())["integrity_passed"] is True
     assert len(list(output.rglob("*.wav"))) == 6
+
+
+@pytest.mark.parametrize("placement", ["parent", "nested-parent"])
+def test_preserved_manifest_parent_components_rejected_before_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    placement: str,
+) -> None:
+    """A real valid manifest must not escape and reenter the bound input root."""
+    source = corpus(tmp_path / "input")
+    prior = write_prior(tmp_path)
+    manifest = (
+        source / ".." / "input" / "chunk_manifest.jsonl"
+        if placement == "parent"
+        else source / "first_crack" / ".." / "chunk_manifest.jsonl"
+    )
+    assert manifest.is_file()
+    before = hashes(source)
+    opened = tracked_descriptors(monkeypatch)
+    with pytest.raises(SystemExit) as error:
+        invoke(monkeypatch, source, tmp_path / "out", prior, "--chunk-manifest", str(manifest))
+    assert error.value.code == 1
+    message = capsys.readouterr().err
+    assert "Preservation failed" in message and "source path components" in message
+    assert not (tmp_path / "out").exists()
+    assert hashes(source) == before
+    assert_descriptors_closed(opened)
+
+
+@pytest.mark.parametrize("component", ["", ".", ".."])
+def test_bound_file_opener_refuses_unsafe_components_before_traversal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    component: str,
+) -> None:
+    """Reject each forbidden raw component without attempting a relative open."""
+    from contextlib import ExitStack
+
+    source = corpus(tmp_path / "input")
+    root = os.open(source, os.O_RDONLY | os.O_DIRECTORY)
+
+    def forbid(*args: object, **kwargs: object) -> int:
+        pytest.fail("Unsafe components reached filesystem traversal")
+
+    monkeypatch.setattr(os, "open", forbid)
+    try:
+        with ExitStack() as handles, pytest.raises(ValueError, match="source path components"):
+            splitter._open_source_file(root, (component, "chunk_manifest.jsonl"), handles)
+    finally:
+        os.close(root)

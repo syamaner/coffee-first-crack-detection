@@ -407,9 +407,14 @@ firmlink aliases are tested. Deliberate bind mounts of an input subdirectory can
 bypass root-inode ancestry and are outside this boundary. Arbitrary mounts are
 not supported by this check. Output
 parents, split directories, copied files and reports use held directory
-descriptors so path swaps cannot redirect writes into the input tree. Directory
-bindings are checked throughout publication; the assignment sidecar precedes the
-final integrity marker. These boundaries bind file resolution; they do not
+descriptors. Directory bindings and ancestry are checked before and after
+creation and report publication; detected changes fail, and exclusive creates
+prevent overwrites. Concurrent directory renaming between these checks is
+unsupported: this is not an atomic filesystem transaction. Final-component
+symlinks for the selected input root or output parent, and unreadable ancestor
+directories, are conservatively refused. On macOS, select canonical
+`/private/tmp` rather than symlink `/tmp` as the final output parent. The
+assignment sidecar precedes the final integrity marker. These boundaries bind file resolution; they do not
 snapshot concurrent in-place edits to regular files. No previous output is erased or
 overwritten. An I/O failure can leave incomplete fresh output; nothing is erased
 to retry, and incomplete chunk copying never publishes an integrity success.

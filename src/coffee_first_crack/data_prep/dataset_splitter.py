@@ -534,6 +534,8 @@ def _load_prior(path: Path) -> tuple[dict[str, list[str]], str]:
 def _open_source_file(root: int, parts: tuple[str, ...], handles: ExitStack) -> int:
     if not parts:
         raise ValueError("Preserved input must be a regular non-symlink file")
+    if any(component in {"", ".", ".."} for component in parts):
+        raise ValueError("Preserved source path components must not be empty, dot or dotdot")
     directory = root
     for component in parts[:-1]:
         directory = os.open(component, _DIRECTORY_FLAGS, dir_fd=directory)
